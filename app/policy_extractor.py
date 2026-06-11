@@ -58,13 +58,27 @@ def extract_with_llm(
     result_text = response.choices[0].message.content.strip()
     result_text = _clean_json_output(result_text)
 
-    # 解析 JSON 结果
-    result = json.loads(result_text)
+    # 解析 JSON 结果（支持数组格式和单个对象格式）
+    raw_result = json.loads(result_text)
 
-    # 返回提取结果（兼容多种字段名）
+    # 统一转换为数组格式
+    if isinstance(raw_result, dict):
+        raw_result = [raw_result]
+
+    # 提取所有记录
+    records = []
+    for item in raw_result:
+        record = {
+            "policyholder_name": item.get("policyholder_name", item.get("投保人姓名", "")),
+            "policy_number": item.get("policy_number", item.get("保单号", item.get("保单号码", "")))
+        }
+        # 过滤掉完全没有有效信息的记录
+        if record["policyholder_name"] or record["policy_number"]:
+            records.append(record)
+
     return {
-        "policyholder_name": result.get("policyholder_name", result.get("投保人姓名", "")),
-        "policy_number": result.get("policy_number", result.get("保单号", result.get("保单号码", "")))
+        "records": records,
+        "total": len(records)
     }
 
 

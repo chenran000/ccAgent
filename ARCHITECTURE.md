@@ -2,7 +2,7 @@
 
 ## 项目概述
 
-基于 DeepSeek 大模型的保险业务 AI 系统，提供用户认证、保单信息提取、投诉工单智能分类、知识库管理和基于知识库的 RAG 问答功能。支持统一对话入口（意图识别 + 智能路由）和多会话管理。数据按用户和会话隔离，每个用户拥有独立的知识库和对话记录。
+基于多模型大模型 AI 的保险业务系统，提供用户认证、AI 模型管理（支持 DeepSeek/OpenAI/通义千问/Kimi/智谱/自定义）、保单信息提取、投诉工单智能分类、知识库管理和基于知识库的 RAG 问答功能。支持统一对话入口（意图识别 + 智能路由）和多会话管理。数据按用户和会话隔离，每个用户拥有独立的知识库、AI 模型配置和对话记录。
 
 ## 目录结构
 
@@ -16,9 +16,9 @@ insuranceAiProject/
 │
 ├── app/                     # 后端代码
 │   ├── __init__.py          # 包初始化
-│   ├── config.py            # 配置管理（API Key、模型、端口、JWT）
+│   ├── config.py            # 配置管理（服务端口、JWT、数据库、知识库路径）
 │   ├── database.py          # 数据库连接（SQLite + SQLAlchemy）
-│   ├── models.py            # ORM 模型（User、Session、Conversation）
+│   ├── models.py            # ORM 模型（User、Session、Conversation、ModelConfig、UserActiveModel）
 │   ├── auth.py              # 认证工具（JWT、bcrypt、用户校验）
 │   ├── schemas.py           # 数据模型（请求/响应格式定义）
 │   ├── prompts.py           # 提示词管理（分类规则、提取模板、知识库问答）
@@ -38,6 +38,7 @@ insuranceAiProject/
 │   │   │   └── ChatPage.tsx       # 主应用页面（含多会话管理）
 │   │   ├── App.tsx                # 应用根组件
 │   │   ├── main.tsx               # React 入口
+│   │   ├── config.ts              # 前端配置（API 地址）
 │   │   └── index.css              # 全局样式（Tailwind）
 │   ├── index.html                 # HTML 模板
 │   ├── package.json               # Node.js 依赖
@@ -47,7 +48,7 @@ insuranceAiProject/
 │   └── postcss.config.js          # PostCSS 配置
 │
 ├── data/                    # 数据持久化（自动生成）
-│   └── app.db               # SQLite 数据库（用户表、会话表、对话记录表）
+│   └── app.db               # SQLite 数据库（用户表、会话表、模型配置表、对话记录表）
 │
 └── knowledge_base/          # 向量数据存储（自动生成）
     └── chroma.sqlite3       # ChromaDB 元数据（按用户隔离的集合）
@@ -59,18 +60,18 @@ insuranceAiProject/
 
 | 模块 | 职责 | 依赖 |
 |------|------|------|
-| `config.py` | 集中管理所有配置项：API Key、模型名称、服务端口、JWT 密钥 | `.env` |
+| `config.py` | 集中管理所有配置项：服务端口、JWT 密钥、数据库路径、知识库路径 | `.env` |
 | `database.py` | SQLAlchemy 数据库连接和会话管理 | `config`, `sqlalchemy` |
-| `models.py` | ORM 数据模型：User（用户表）、Session（会话表）、Conversation（对话记录表） | `database` |
+| `models.py` | ORM 数据模型：User（用户表）、Session（会话表）、Conversation（对话记录表）、ModelConfig（模型配置表）、UserActiveModel（活跃模型表） | `database` |
 | `auth.py` | 用户认证：密码加密（bcrypt）、JWT 签发/验证、用户校验中间件 | `config`, `database` |
-| `schemas.py` | 定义所有接口的数据格式（含认证、会话、对话、知识库模型） | `pydantic` |
+| `schemas.py` | 定义所有接口的数据格式（含认证、会话、对话、知识库、AI 模型模型） | `pydantic` |
 | `prompts.py` | 管理所有 AI 提示词模板和业务枚举值（分类、原因、知识库问答模板） | 无 |
 | `vector_db.py` | ChromaDB 向量数据库 + sentence-transformers 本地 Embedding | `config`, `chromadb` |
 | `intent_classifier.py` | 意图识别：本地规则分类（关键词匹配）+ AI 模型分类 | `prompts`, `config` |
 | `complaint_classifier.py` | 投诉分类核心逻辑：调用 AI 分类、结果校验、容错处理 | `prompts`, `config` |
 | `policy_extractor.py` | 保单提取核心逻辑：普通模式和 RAG 模式（按用户检索知识） | `prompts`, `config`, `vector_db` |
 | `knowledge_qa.py` | 知识库 RAG 问答：向量检索 + 上下文拼接 + AI 生成回答 | `prompts`, `config`, `vector_db` |
-| `routes.py` | 所有 HTTP 接口路由：认证、会话管理、业务接口、对话历史管理 | `schemas`, `auth`, 功能模块 |
+| `routes.py` | 所有 HTTP 接口路由：认证、会话管理、AI 模型管理、业务接口、对话历史管理 | `schemas`, `auth`, 功能模块 |
 
 ### 前端模块 (frontend-react/)
 
@@ -93,6 +94,7 @@ insuranceAiProject/
 | 投诉工单分类 | 智能分类业务类型和投诉原因，显示置信度徽章 |
 | 保单信息提取 | 从保险文本中提取投保人姓名和保单号（支持 RAG 增强模式） |
 | 知识库管理 | 添加、搜索、编辑、删除和管理保险知识文档 |
+| AI 模型管理 | 添加/编辑/删除/切换 AI 模型配置，支持多平台（DeepSeek/OpenAI/通义千问/Kimi/智谱/自定义） |
 | 对话历史 | 按会话加载和展示历史对话记录，支持清空操作 |
 | 用户认证 | 登录/注册/退出，Token 自动续期，401 自动登出 |
 
@@ -103,7 +105,7 @@ insuranceAiProject/
        ↓
 前端发送 HTTP 请求（携带 Authorization: Bearer token + session_id）
        ↓
-routes.py 验证 Token → 获取当前用户
+routes.py 验证 Token → 获取当前用户 → 获取用户 AI 模型配置
        ↓
 意图识别（本地规则匹配） → 路由到对应模块
        ↓
@@ -111,7 +113,7 @@ routes.py 验证 Token → 获取当前用户
    ↓              ↓              ↓              ↓              ↓
 policy_extractor  complaint_classifier  knowledge_qa   对话记录保存
    ↓              ↓              ↓              ↓
-调用 DeepSeek AI  调用 DeepSeek AI  RAG检索+生成  SQLite 持久化
+调用 AI API       调用 AI API       RAG检索+生成   SQLite 持久化
    ↓              ↓              ↓              ↓
 返回 JSON 结果 → 前端展示结果 + 更新会话列表
 ```
@@ -132,6 +134,20 @@ policy_extractor  complaint_classifier  knowledge_qa   对话记录保存
 | POST | `/sessions` | 是 | 创建新会话 |
 | PUT | `/sessions/{id}` | 是 | 更新会话名称 |
 | DELETE | `/sessions/{id}` | 是 | 删除会话及所有对话记录 |
+
+### AI 模型管理
+| 方法 | 路径 | 认证 | 功能 |
+|------|------|------|------|
+| GET | `/settings/platforms` | 是 | 获取支持的 AI 平台列表（DeepSeek/OpenAI/通义千问/Kimi/智谱/自定义） |
+| GET | `/settings/models` | 是 | 获取用户的模型配置列表（分内置/自定义两组） |
+| POST | `/settings/models` | 是 | 添加模型配置（统一标记为自定义平台） |
+| GET | `/settings/models/{id}` | 是 | 获取单个模型配置详情 |
+| PUT | `/settings/models/{id}` | 是 | 更新模型配置 |
+| DELETE | `/settings/models/{id}` | 是 | 删除模型配置 |
+| GET | `/settings/active` | 是 | 获取当前活跃模型 |
+| POST | `/settings/active/{id}` | 是 | 设置当前活跃模型 |
+| DELETE | `/settings/active` | 是 | 取消选择模型（使用默认） |
+| POST | `/settings/ai/test` | 否 | 测试 AI 连接是否正常 |
 
 ### 对话历史
 | 方法 | 路径 | 认证 | 功能 |
@@ -195,7 +211,8 @@ npm run dev
 | 类别 | 技术 |
 |------|------|
 | 后端框架 | FastAPI |
-| AI 模型 | DeepSeek (deepseek-v4-flash) |
+| AI 模型 | **多平台支持**：DeepSeek / OpenAI / 通义千问 / Kimi / 智谱 / 自定义 |
+| AI 客户端 | OpenAI Python SDK (兼容 OpenAI API 格式的平台) |
 | Embedding 模型 | **sentence-transformers (all-MiniLM-L6-v2)** |
 | 向量数据库 | ChromaDB (HNSW 索引 + 余弦相似度) |
 | 关系数据库 | SQLite + SQLAlchemy ORM |
@@ -256,6 +273,20 @@ npm run dev
 - 384 维向量输出
 - 在数百万句子对上训练过
 - 支持中英文语义理解
+
+### 多模型支持设计
+
+从单一 DeepSeek 模型扩展到多平台多模型支持：
+
+| 特性 | 旧方案 | 新方案 |
+|------|--------|--------|
+| 模型绑定 | 硬编码在 `.env` | 用户级数据库配置 |
+| 平台支持 | 仅 DeepSeek | DeepSeek/OpenAI/通义千问/Kimi/智谱/自定义 |
+| 多模型 | 不支持 | 每用户可配置多个模型 |
+| 切换方式 | 改环境变量重启 | 前端一键切换，无需重启 |
+| 数据隔离 | 共享 | 按用户隔离配置 |
+
+**API 兼容性**：所有支持的 AI 平台均使用 OpenAI 兼容的 API 格式（`openai` Python SDK），通过 `api_base_url` 和 `api_key` 区分不同平台。
 
 ### 用户认证方案
 
@@ -361,6 +392,17 @@ npm run dev
 → 返回文档 ID
 ```
 
+### AI 模型配置流程
+
+```
+用户进入模型管理 → POST /settings/models（提交平台、API Key、URL、模型名）
+→ 后端保存配置到 model_configs 表（统一标记为 custom 平台）
+→ 如果是第一个配置，自动设为活跃模型（写入 user_active_models）
+→ 用户可切换活跃模型 → POST /settings/active/{config_id}
+→ 业务调用时从 user_active_models 获取当前模型的 api_key / api_base_url / model_name
+→ 调用对应 AI 平台的 API
+```
+
 ### 对话历史流程
 
 ```
@@ -403,6 +445,29 @@ npm run dev
 | input_text | TEXT | 用户输入内容 |
 | output_data | TEXT | AI 输出结果（JSON 字符串） |
 | created_at | DATETIME | 创建时间，索引 |
+
+### model_configs 表（模型配置）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | INTEGER | 主键，自增 |
+| user_id | INTEGER | 外键 → users.id |
+| platform | VARCHAR(50) | 平台标识：deepseek / openai / qwen / kimi / zhipu / custom |
+| api_key | VARCHAR(255) | API 密钥 |
+| api_base_url | VARCHAR(255) | API 基础 URL |
+| model_name | VARCHAR(100) | 模型名称 |
+| is_active | INTEGER | 是否启用（默认 1） |
+| created_at | DATETIME | 创建时间 |
+| updated_at | DATETIME | 更新时间 |
+
+### user_active_models 表（活跃模型）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | INTEGER | 主键，自增 |
+| user_id | INTEGER | 外键 → users.id（唯一索引） |
+| model_config_id | INTEGER | 外键 → model_configs.id（允许 NULL） |
+| updated_at | DATETIME | 更新时间 |
 
 ## 前端架构
 

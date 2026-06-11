@@ -320,7 +320,7 @@ export default function ChatPage() {
       // Already sorted ASC by created_at on backend
       setMessages(data.conversations.map((c: any) => {
         const parsed = JSON.parse(c.output_data);
-        if (parsed.policyholder_name !== undefined) {
+        if (parsed.records || parsed.policyholder_name !== undefined) {
           return { id: c.id, input: c.input_text, output: { intent: 'extract', module: 'extract', data: parsed, message: '' }, time: c.created_at, intent: 'extract', module: 'extract', session_id: c.session_id };
         }
         if (parsed.category !== undefined) {
@@ -1025,17 +1025,37 @@ export default function ChatPage() {
                             <div className="space-y-2">
                               <div className="flex items-center gap-2 text-xs font-semibold text-slate-300">
                                 <FileText className="w-3.5 h-3.5" /> 提取结果
+                                {msg.output.data?.total && (
+                                  <span className="text-[10px] text-slate-500">({msg.output.data.total} 条)</span>
+                                )}
                               </div>
-                              <div className="grid grid-cols-2 gap-3">
-                                <div>
-                                  <div className="text-[10px] text-slate-500">投保人姓名</div>
-                                  <div className="text-sm text-white font-medium">{msg.output.data?.policyholder_name || '未找到'}</div>
+                              {msg.output.data?.records && msg.output.data.records.length > 0 ? (
+                                <div className="space-y-2">
+                                  {msg.output.data.records.map((record: any, idx: number) => (
+                                    <div key={idx} className="grid grid-cols-2 gap-3 p-2 bg-white/[0.02] rounded-lg">
+                                      <div>
+                                        <div className="text-[10px] text-slate-500">投保人姓名</div>
+                                        <div className="text-sm text-white font-medium">{record.policyholder_name || '未找到'}</div>
+                                      </div>
+                                      <div>
+                                        <div className="text-[10px] text-slate-500">保单号</div>
+                                        <div className="text-sm text-white font-medium font-mono">{record.policy_number || '未找到'}</div>
+                                      </div>
+                                    </div>
+                                  ))}
                                 </div>
-                                <div>
-                                  <div className="text-[10px] text-slate-500">保单号</div>
-                                  <div className="text-sm text-white font-medium font-mono">{msg.output.data?.policy_number || '未找到'}</div>
+                              ) : (
+                                <div className="grid grid-cols-2 gap-3">
+                                  <div>
+                                    <div className="text-[10px] text-slate-500">投保人姓名</div>
+                                    <div className="text-sm text-white font-medium">{msg.output.data?.policyholder_name || '未找到'}</div>
+                                  </div>
+                                  <div>
+                                    <div className="text-[10px] text-slate-500">保单号</div>
+                                    <div className="text-sm text-white font-medium font-mono">{msg.output.data?.policy_number || '未找到'}</div>
+                                  </div>
                                 </div>
-                              </div>
+                              )}
                             </div>
                           ) : msg.output.module === 'complaint' ? (
                             <div className="space-y-2">

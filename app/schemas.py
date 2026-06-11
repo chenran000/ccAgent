@@ -59,9 +59,14 @@ class ExtractRequest(BaseModel):
     use_rag: bool = False
     session_id: Optional[str] = None
 
-class ExtractResponse(BaseModel):
+class ExtractRecord(BaseModel):
+    """单条提取记录"""
     policyholder_name: str
     policy_number: str
+
+class ExtractResponse(BaseModel):
+    records: List[ExtractRecord]
+    total: int
 
 # 知识库相关模型
 class KnowledgeDoc(BaseModel):
