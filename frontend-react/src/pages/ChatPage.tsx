@@ -3,7 +3,8 @@ import { useAuth, apiFetch } from '../context/AuthContext';
 import { API_BASE } from '../config';
 import {
   Shield, LogOut, FileText, AlertTriangle, BookOpen, Send, Plus, Trash2,
-  Loader2, Sparkles, Pencil, Save, X, MessageSquare, Zap, Settings
+  Loader2, Sparkles, Pencil, Save, X, MessageSquare, Zap, Settings,
+  FileUp
 } from 'lucide-react';
 
 type ModuleType = 'extract' | 'complaint' | 'knowledge';
@@ -29,6 +30,15 @@ interface Session {
   name: string;
   created_at: string;
   updated_at: string;
+}
+
+interface FileItem {
+  id: number;
+  original_filename: string;
+  file_type: string;
+  file_size: number;
+  created_at: string;
+  extracted_text_preview: string;
 }
 
 // Intent config for display
@@ -89,6 +99,22 @@ export default function ChatPage() {
   const [showAddApiKey, setShowAddApiKey] = useState(false);
   const [expandedGroups, setExpandedGroups] = useState<{builtin: boolean; custom: boolean}>({builtin: true, custom: true});
 
+  // File upload state
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [isUploadingFile, setIsUploadingFile] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // File management panel state
+  const [showFilePanel, setShowFilePanel] = useState(false);
+  const [fileList, setFileList] = useState<FileItem[]>([]);
+  const [isUploadingFilePanel, setIsUploadingFilePanel] = useState(false);
+  const [deletingFileId, setDeletingFileId] = useState<number | null>(null);
+  const [selectedFileId, setSelectedFileId] = useState<number | null>(null);
+  const [filePanelUploadFile, setFilePanelUploadFile] = useState<File | null>(null);
+  const pendingFileRef = useRef<File | null>(null);
+  const [confirmUploadFile, setConfirmUploadFile] = useState<{name: string; size: number; type: string} | null>(null);
+  const filePanelInputRef = useRef<HTMLInputElement>(null);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const currentSessionIdRef = useRef<string | null>(null);
@@ -130,6 +156,12 @@ export default function ChatPage() {
       loadKnowledgeList();
     }
   }, [showKnowledge]);
+
+  useEffect(() => {
+    if (showFilePanel) {
+      loadFileList();
+    }
+  }, [showFilePanel]);
 
   // Load AI settings
   useEffect(() => {
@@ -278,7 +310,6 @@ export default function ChatPage() {
       if (!res.ok) { const e = await res.json(); throw new Error(e.detail); }
       if (activeModelId === configId) {
         setActiveModelId(null);
-        setUseDefaultModel(true);
       }
       loadModels();
       loadActiveModel();
@@ -481,6 +512,139 @@ export default function ChatPage() {
     }
   };
 
+  // File management functions
+  const loadFileList = async () => {
+    try {
+      const res = await apiFetch('/files');
+      if (!res.ok) throw new Error();
+      const data = await res.json();
+      setFileList(data.files || []);
+    } catch { setFileList([]); }
+  };
+
+  const handleFilePanelSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith('.pdf') && !file.name.toLowerCase().endsWith('.txt')) {
+      alert('仅支持 PDF 和 TXT 文件');
+      return;
+    }
+    // Store file in ref (File objects can't be in state)
+    pendingFileRef.current = file;
+    setConfirmUploadFile({
+      name: file.name,
+      size: file.size,
+      type: file.type,
+    });
+  };
+
+  const handleFilePanelUpload = async (file: File) => {
+    if (!file || isUploadingFilePanel) return;
+    setIsUploadingFilePanel(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const token = localStorage.getItem('auth_token');
+      const res = await fetch(`${API_BASE}/files/upload`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` },
+        body: formData,
+      });
+      if (!res.ok) { const e = await res.json(); throw new Error(e.detail); }
+      loadFileList();
+    } catch (e: any) {
+      alert('文件上传失败: ' + e.message);
+    } finally {
+      setIsUploadingFilePanel(false);
+      setFilePanelUploadFile(null);
+      if (filePanelInputRef.current) filePanelInputRef.current.value = '';
+    }
+  };
+
+  const deleteFile = async (fileId: number) => {
+    try {
+      const res = await apiFetch(`/files/${fileId}`, { method: 'DELETE' });
+      if (!res.ok) { const e = await res.json(); throw new Error(e.detail); }
+      setFileList(prev => prev.filter(f => f.id !== fileId));
+      if (selectedFileId === fileId) setSelectedFileId(null);
+    } catch (e: any) {
+      alert('文件删除失败: ' + e.message);
+    } finally {
+      setDeletingFileId(null);
+    }
+  };
+
+  const sendChatWithFile = async (fileId: number) => {
+    const text = inputText.trim() || '请读取这个文件的内容并总结';
+    setInputText('');
+    setIsProcessing(true);
+
+    const tempId = Date.now();
+    setMessages(prev => [...prev, {
+      id: tempId,
+      input: `[引用文件] ${text}`,
+      output: null as any,
+      time: new Date().toISOString(),
+      intent: '',
+      module: '',
+      session_id: currentSessionId || '',
+    }]);
+
+    try {
+      const res = await apiFetch('/chat', {
+        method: 'POST',
+        body: JSON.stringify({ content: text, use_rag: useRag, session_id: currentSessionId, file_id: fileId }),
+      });
+      if (!res.ok) { const e = await res.json(); throw new Error(e.detail); }
+      const data = await res.json();
+
+      if (data.module === 'knowledge') {
+        loadKnowledgeList();
+      }
+
+      loadSessions();
+      loadFileList();
+
+      setMessages(prev => {
+        const updated = [...prev];
+        const idx = updated.findIndex(m => m.id === tempId);
+        if (idx !== -1) {
+          updated[idx] = {
+            id: tempId,
+            input: `[引用文件] ${text}`,
+            output: { intent: data.intent, module: data.module, data: data.data, message: data.message },
+            time: updated[idx].time,
+            intent: data.intent,
+            module: data.module,
+            session_id: data.session_id || currentSessionId || '',
+          };
+        }
+        return updated;
+      });
+      setTotalCount(prev => prev + 1);
+      updateKnowledgeStats();
+    } catch (e: any) {
+      setMessages(prev => {
+        const updated = [...prev];
+        const idx = updated.findIndex(m => m.id === tempId);
+        if (idx !== -1) {
+          updated[idx] = {
+            id: tempId,
+            input: `[引用文件] ${text}`,
+            output: { error: e.message },
+            time: updated[idx].time,
+            intent: '',
+            module: '',
+            session_id: currentSessionId || '',
+          };
+        }
+        return updated;
+      });
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
   const handleSend = async () => {
     if (!inputText.trim() || isProcessing) return;
     const text = inputText.trim();
@@ -551,6 +715,93 @@ export default function ChatPage() {
     } finally {
       setIsProcessing(false);
     }
+  };
+
+  const handleFileUpload = async (file: File) => {
+    if (!file || isUploadingFile || !currentSessionId) return;
+    setIsUploadingFile(true);
+
+    const tempId = Date.now();
+    setMessages(prev => [...prev, {
+      id: tempId,
+      input: `[上传文件: ${file.name}]`,
+      output: null as any,
+      time: new Date().toISOString(),
+      intent: 'extract',
+      module: 'extract',
+      session_id: currentSessionId,
+    }]);
+
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('use_rag', String(useRag));
+      if (currentSessionId) formData.append('session_id', currentSessionId);
+
+      const token = localStorage.getItem('auth_token');
+      const res = await fetch(`${API_BASE}/extractPolicyInfo/file`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+        body: formData,
+      });
+      if (!res.ok) { const e = await res.json(); throw new Error(e.detail); }
+      const data = await res.json();
+
+      loadSessions();
+
+      setMessages(prev => {
+        const updated = [...prev];
+        const idx = updated.findIndex(m => m.id === tempId);
+        if (idx !== -1) {
+          updated[idx] = {
+            id: tempId,
+            input: `[上传文件: ${file.name}]`,
+            output: { intent: 'extract', module: 'extract', data, message: '文件提取成功' },
+            time: updated[idx].time,
+            intent: 'extract',
+            module: 'extract',
+            session_id: data.session_id || currentSessionId || '',
+          };
+        }
+        return updated;
+      });
+      setTotalCount(prev => prev + 1);
+      updateKnowledgeStats();
+    } catch (e: any) {
+      setMessages(prev => {
+        const updated = [...prev];
+        const idx = updated.findIndex(m => m.id === tempId);
+        if (idx !== -1) {
+          updated[idx] = {
+            id: tempId,
+            input: `[上传文件: ${file.name}]`,
+            output: { error: e.message },
+            time: updated[idx].time,
+            intent: 'extract',
+            module: 'extract',
+            session_id: currentSessionId,
+          };
+        }
+        return updated;
+      });
+    } finally {
+      setIsUploadingFile(false);
+      setSelectedFile(null);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith('.pdf')) {
+      alert('仅支持 PDF 文件');
+      return;
+    }
+    setSelectedFile(file);
+    handleFileUpload(file);
   };
 
   const clearAllChat = async () => {
@@ -858,6 +1109,14 @@ export default function ChatPage() {
         </div>
 
         <div className="p-4 border-t border-white/5 space-y-2">
+          <button
+            onClick={() => setShowFilePanel(true)}
+            className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm text-slate-400 hover:bg-white/5 hover:text-white transition-all"
+          >
+            <FileUp className="w-4 h-4" />
+            <span>文件管理</span>
+            <span className="ml-auto text-[10px] px-1.5 py-0.5 rounded-full bg-white/5 text-slate-500">{fileList.length}</span>
+          </button>
           <button
             onClick={() => setShowKnowledge(true)}
             className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm text-slate-400 hover:bg-white/5 hover:text-white transition-all"
@@ -1383,6 +1642,166 @@ export default function ChatPage() {
           onDelete={deleteModel}
         />
       )}
+
+      {/* File Management Panel (Right Side) */}
+      {showFilePanel && (
+        <div className="fixed inset-0 z-[9999] bg-black/30 backdrop-blur-sm flex justify-end">
+          <div className="w-80 bg-slate-900/95 backdrop-blur-xl border-l border-white/10 flex flex-col h-full animate-slide-left">
+            {/* Panel Header */}
+            <div className="px-5 py-4 border-b border-white/5 flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+                  <FileUp className="w-4 h-4 text-blue-400" />
+                  文件管理
+                </h3>
+                <p className="text-[10px] text-slate-500 mt-0.5">共 {fileList.length} 个文件</p>
+              </div>
+              <button onClick={() => setShowFilePanel(false)} className="p-1 text-slate-400 hover:text-white transition-colors">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Upload Area */}
+            <div className="px-4 py-3 border-b border-white/5">
+              <input
+                ref={filePanelInputRef}
+                type="file"
+                accept=".pdf,.txt"
+                onChange={handleFilePanelSelect}
+                className="hidden"
+              />
+              <button
+                onClick={() => filePanelInputRef.current?.click()}
+                disabled={isUploadingFilePanel}
+                className="w-full flex items-center justify-center gap-2 px-3 py-2.5 bg-gradient-to-r from-blue-500 to-blue-700 text-white text-sm rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50"
+              >
+                {isUploadingFilePanel ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileUp className="w-4 h-4" />}
+                {isUploadingFilePanel ? '上传中...' : '上传文件'}
+              </button>
+              <p className="text-[10px] text-slate-500 mt-2 text-center">支持 PDF、TXT 格式</p>
+            </div>
+
+            {/* File List */}
+            <div className="flex-1 overflow-y-auto scrollbar-thin px-4 py-3 space-y-2">
+              {fileList.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-12 text-center">
+                  <div className="w-12 h-12 bg-white/[0.03] rounded-xl flex items-center justify-center mb-3">
+                    <FileUp className="w-5 h-5 text-slate-600" />
+                  </div>
+                  <p className="text-xs text-slate-500">暂无文件</p>
+                  <p className="text-[10px] text-slate-600 mt-1">点击上方按钮上传文件</p>
+                </div>
+              ) : (
+                fileList.map(file => (
+                  <div
+                    key={file.id}
+                    className={`bg-white/[0.03] border rounded-lg overflow-hidden transition-all ${
+                      selectedFileId === file.id ? 'border-blue-500/30 bg-blue-500/5' : 'border-white/5 hover:border-white/10'
+                    }`}
+                  >
+                    {/* File Info */}
+                    <div className="px-3 py-2.5">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex-1 min-w-0">
+                          <div className="text-xs text-white font-medium truncate">{file.original_filename}</div>
+                          <div className="flex items-center gap-2 mt-1">
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 uppercase">{file.file_type}</span>
+                            <span className="text-[10px] text-slate-500">{(file.file_size / 1024).toFixed(1)} KB</span>
+                          </div>
+                          {file.extracted_text_preview && (
+                            <p className="text-[10px] text-slate-500 mt-1.5 line-clamp-2">{file.extracted_text_preview}</p>
+                          )}
+                        </div>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setDeletingFileId(file.id); }}
+                          className="p-1 text-slate-500 hover:text-red-400 transition-colors flex-shrink-0"
+                          title="删除"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      </div>
+                    </div>
+                    {/* Action Button */}
+                    <div className="px-3 py-2 border-t border-white/5">
+                      <button
+                        onClick={() => {
+                          setSelectedFileId(file.id);
+                          sendChatWithFile(file.id);
+                          setShowFilePanel(false);
+                        }}
+                        disabled={isProcessing}
+                        className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 bg-blue-500/10 border border-blue-500/20 rounded text-[10px] text-blue-400 hover:bg-blue-500/20 transition-colors disabled:opacity-50"
+                      >
+                        <Sparkles className="w-3 h-3" />
+                        让 AI 读取此文件
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* File Delete Confirmation */}
+      {deletingFileId !== null && (
+        <div className="fixed inset-0 z-[99999] bg-black/50 backdrop-blur-sm flex items-center justify-center">
+          <div className="bg-slate-800 border border-white/10 rounded-xl p-6 max-w-sm w-full mx-4 shadow-2xl">
+            <h3 className="text-white font-semibold mb-2">确认删除文件</h3>
+            <p className="text-sm text-slate-400 mb-6">删除后无法恢复，确定要删除这个文件吗？</p>
+            <div className="flex gap-3 justify-end">
+              <button onClick={() => setDeletingFileId(null)} className="px-4 py-2 bg-slate-700 text-white text-sm rounded-lg hover:bg-slate-600 transition-colors">取消</button>
+              <button onClick={() => deleteFile(deletingFileId)} className="px-4 py-2 bg-red-500 text-white text-sm rounded-lg hover:bg-red-600 transition-colors">确认删除</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* File Upload Confirmation */}
+      {confirmUploadFile !== null && (
+        <div className="fixed inset-0 z-[99999] bg-black/50 backdrop-blur-sm flex items-center justify-center">
+          <div className="bg-slate-800 border border-white/10 rounded-xl p-6 max-w-sm w-full mx-4 shadow-2xl">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-lg bg-blue-500/20 flex items-center justify-center">
+                <FileUp className="w-5 h-5 text-blue-400" />
+              </div>
+              <div>
+                <h3 className="text-white font-semibold">确认上传文件</h3>
+                <p className="text-[10px] text-slate-500 mt-0.5">文件将被解析并存储</p>
+              </div>
+            </div>
+            <div className="bg-slate-900/50 rounded-lg px-4 py-3 mb-6">
+              <div className="text-xs text-white font-medium">{confirmUploadFile.name}</div>
+              <div className="flex items-center gap-2 mt-1">
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 uppercase">{confirmUploadFile.name.split('.').pop()}</span>
+                <span className="text-[10px] text-slate-500">{(confirmUploadFile.size / 1024).toFixed(1)} KB</span>
+              </div>
+            </div>
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => { setConfirmUploadFile(null); if (filePanelInputRef.current) filePanelInputRef.current.value = ''; }}
+                className="px-4 py-2 bg-slate-700 text-white text-sm rounded-lg hover:bg-slate-600 transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={() => {
+                  if (pendingFileRef.current) {
+                    handleFilePanelUpload(pendingFileRef.current);
+                  }
+                  setConfirmUploadFile(null);
+                  pendingFileRef.current = null;
+                }}
+                className="px-4 py-2 bg-gradient-to-r from-blue-500 to-blue-700 text-white text-sm rounded-lg hover:opacity-90 transition-opacity flex items-center gap-2"
+              >
+                <FileUp className="w-3.5 h-3.5" />
+                确认上传
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1573,7 +1992,7 @@ function EditModelModal({ modelId, onClose, onSave, onTest, onDelete }: {
         )}
 
         <div className="flex gap-2 justify-end">
-          <button onClick={() => onDelete(modelId)} className="px-3 py-2 bg-red-500/10 text-red-400 text-xs rounded-lg hover:bg-red-500/20 transition-colors flex items-center gap-1.5">
+          <button onClick={() => modelId !== null && onDelete(modelId)} className="px-3 py-2 bg-red-500/10 text-red-400 text-xs rounded-lg hover:bg-red-500/20 transition-colors flex items-center gap-1.5">
             <Trash2 className="w-3.5 h-3.5" />
             删除
           </button>

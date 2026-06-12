@@ -4,6 +4,32 @@ from app.prompts import KNOWLEDGE_QA_PROMPT
 from app.vector_db import vector_db
 
 
+def direct_chat(question: str, ai_config: dict) -> str:
+    """
+    直接调用大模型进行对话（不使用知识库）
+
+    Args:
+        question: 用户问题
+        ai_config: 用户 AI 配置 {api_key, api_base_url, chat_model}
+    """
+    if not ai_config or not ai_config.get("api_key"):
+        raise ValueError("请在模型管理中配置 AI 模型")
+
+    system_prompt = "你是一个专业的保险业务助手。请回答用户的问题，使用你的通用知识。"
+
+    client = openai.OpenAI(api_key=ai_config["api_key"], base_url=ai_config["api_base_url"])
+    response = client.chat.completions.create(
+        model=ai_config["chat_model"],
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": question}
+        ],
+        temperature=0.7,
+    )
+
+    return response.choices[0].message.content.strip()
+
+
 def answer_with_knowledge(
     question: str,
     user_id: int,

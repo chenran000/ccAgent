@@ -75,3 +75,21 @@ class Conversation(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
 
     session = relationship("Session", back_populates="conversations")
+
+
+class Document(Base):
+    """用户上传的文件表"""
+    __tablename__ = "documents"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    original_filename = Column(String(255), nullable=False)  # 原始文件名
+    stored_filename = Column(String(255), nullable=False)  # 存储文件名（UUID）
+    file_path = Column(String(500), nullable=False)  # 文件存储路径
+    file_type = Column(String(50), nullable=False)  # pdf / txt / ...
+    file_size = Column(Integer, nullable=False)  # 文件大小（字节）
+    extracted_text = Column(Text, nullable=True)  # 提取的文本内容（用于对话引用）
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    user = relationship("User", backref="documents")

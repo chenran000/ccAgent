@@ -68,6 +68,35 @@ class ExtractResponse(BaseModel):
     records: List[ExtractRecord]
     total: int
 
+# 文件提取相关模型
+class FileExtractRequest(BaseModel):
+    use_rag: bool = False
+    session_id: Optional[str] = None
+
+# 文件管理相关模型
+class FileInfo(BaseModel):
+    """文件信息"""
+    id: int
+    original_filename: str
+    file_type: str
+    file_size: int
+    created_at: str
+    extracted_text_preview: str
+
+class FileUploadResponse(BaseModel):
+    """文件上传响应"""
+    id: int
+    original_filename: str
+    file_type: str
+    file_size: int
+    message: str
+
+class FileReadResponse(BaseModel):
+    """文件读取响应"""
+    id: int
+    original_filename: str
+    extracted_text: str
+
 # 知识库相关模型
 class KnowledgeDoc(BaseModel):
     id: str
@@ -111,6 +140,7 @@ class ChatRequest(BaseModel):
     content: str
     use_rag: bool = False  # 仅 extract 模块使用
     session_id: Optional[str] = None  # 会话ID，可选
+    file_id: Optional[int] = None  # 引用的文件ID，可选
 
 class IntentResult(BaseModel):
     intent: str           # extract / complaint / knowledge / chat

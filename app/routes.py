@@ -1,18 +1,20 @@
 """API 路由定义模块"""
 import json
+import os
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List
-from fastapi import HTTPException, Depends
+from fastapi import HTTPException, Depends, File, UploadFile, Form
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.database import get_db, init_db
-from app.models import User, Session as SessionModel, Conversation, ModelConfig, UserActiveModel
+from app.models import User, Session as SessionModel, Conversation, ModelConfig, UserActiveModel, Document
 from app.auth import hash_password, verify_password, create_access_token, get_current_user
 from app.schemas import (
-    ExtractRequest, ExtractResponse,
+    ExtractRequest, ExtractResponse, FileExtractRequest,
     ComplaintClassificationRequest, ComplaintClassificationResponse, ClassificationResult,
     AddKnowledgeRequest, SearchRequest, SearchResponse, KnowledgeStatsResponse,
     RegisterRequest, LoginRequest, AuthResponse, UserInfo,
@@ -21,13 +23,16 @@ from app.schemas import (
     SessionInfo, SessionListResponse, CreateSessionRequest, UpdateSessionRequest,
     SupportedPlatform, ModelConfigInfo, ModelListResponse,
     AddModelRequest, UpdateModelRequest, TestAIRequest, TestAIResponse, ActiveModelResponse,
+    FileInfo, FileUploadResponse, FileReadResponse,
 )
 from app.policy_extractor import extract_with_llm
 from app.complaint_classifier import classify_complaint
 from app.intent_classifier import classify_intent_local
-from app.knowledge_qa import answer_with_knowledge
+from app.knowledge_qa import answer_with_knowledge, direct_chat
 from app.prompts import BUSINESS_CATEGORIES, COMPLAINT_REASONS
 from app.vector_db import vector_db
+from app.file_parser import parse_file
+from app.file_storage import save_file, delete_file as delete_file_from_disk, get_user_upload_dir
 
 
 def register_routes(app):
@@ -497,6 +502,194 @@ def register_routes(app):
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"信息抽取失败: {str(e)}")
 
+    @app.post("/extractPolicyInfo/file", response_model=ExtractResponse, summary="从文件提取保单信息")
+    async def extract_policy_info_from_file(
+        file: UploadFile = File(...),
+        use_rag: bool = Form(False),
+        session_id: str = Form(None),
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        """从上传的 PDF 文件中提取保单信息"""
+        try:
+            # 验证文件类型
+            if not file.filename or not file.filename.lower().endswith('.pdf'):
+                raise HTTPException(status_code=400, detail="仅支持 PDF 文件")
+
+            # 保存文件到临时目录
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+                content = await file.read()
+                tmp_file.write(content)
+                tmp_file_path = tmp_file.name
+
+            try:
+                # 解析文件提取文本
+                extracted_text = parse_file(tmp_file_path, file.filename)
+                if not extracted_text.strip():
+                    raise HTTPException(status_code=400, detail="文件中未找到可读取的文本内容")
+
+                # 调用现有的 LLM 提取
+                ai_config = _get_user_ai_config(current_user.id, db)
+                result = extract_with_llm(
+                    extracted_text,
+                    use_rag=use_rag,
+                    user_id=current_user.id,
+                    ai_config=ai_config,
+                )
+                response = ExtractResponse(**result)
+
+                # 保存对话记录（存储原始文件名和解析后的文本）
+                conversation = Conversation(
+                    user_id=current_user.id,
+                    session_id=session_id,
+                    module="extract",
+                    input_text=f"[文件: {file.filename}]\n{extracted_text[:500]}",
+                    output_data=json.dumps(result, ensure_ascii=False),
+                )
+                db.add(conversation)
+                db.commit()
+
+                return response
+            finally:
+                # 清理临时文件
+                if os.path.exists(tmp_file_path):
+                    os.remove(tmp_file_path)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"文件提取失败: {str(e)}")
+
+    # ==================== 文件管理接口 ====================
+
+    @app.post("/files/upload", summary="上传文件")
+    async def upload_file(
+        file: UploadFile = File(...),
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        """上传文件到服务器，解析文本内容后保存"""
+        try:
+            if not file.filename:
+                raise HTTPException(status_code=400, detail="文件名不能为空")
+
+            # 读取文件内容
+            file_bytes = await file.read()
+            if not file_bytes:
+                raise HTTPException(status_code=400, detail="文件不能为空")
+
+            # 保存文件并提取文本
+            file_info = save_file(file_bytes, file.filename, current_user.id)
+
+            # 保存到数据库
+            doc = Document(
+                user_id=current_user.id,
+                original_filename=file_info["original_filename"],
+                stored_filename=file_info["stored_filename"],
+                file_path=file_info["file_path"],
+                file_type=file_info["file_type"],
+                file_size=file_info["file_size"],
+                extracted_text=file_info["extracted_text"],
+            )
+            db.add(doc)
+            db.commit()
+            db.refresh(doc)
+
+            return {
+                "id": doc.id,
+                "original_filename": doc.original_filename,
+                "file_type": doc.file_type,
+                "file_size": doc.file_size,
+                "message": "文件上传成功",
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"文件上传失败: {str(e)}")
+
+    @app.get("/files", summary="获取文件列表")
+    async def list_files(
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        """获取当前用户上传的所有文件"""
+        try:
+            docs = db.query(Document).filter(
+                Document.user_id == current_user.id
+            ).order_by(Document.created_at.desc()).all()
+
+            files = []
+            for doc in docs:
+                preview = ""
+                if doc.extracted_text:
+                    preview = doc.extracted_text[:200]
+                files.append({
+                    "id": doc.id,
+                    "original_filename": doc.original_filename,
+                    "file_type": doc.file_type,
+                    "file_size": doc.file_size,
+                    "created_at": doc.created_at.isoformat(),
+                    "extracted_text_preview": preview,
+                })
+
+            return {"files": files, "total": len(files)}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"获取文件列表失败: {str(e)}")
+
+    @app.get("/files/{file_id}", summary="读取文件内容")
+    async def read_file(
+        file_id: int,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        """读取指定文件的内容"""
+        try:
+            doc = db.query(Document).filter(
+                Document.id == file_id,
+                Document.user_id == current_user.id
+            ).first()
+
+            if not doc:
+                raise HTTPException(status_code=404, detail="文件不存在")
+
+            return {
+                "id": doc.id,
+                "original_filename": doc.original_filename,
+                "extracted_text": doc.extracted_text or "",
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"读取文件失败: {str(e)}")
+
+    @app.delete("/files/{file_id}", summary="删除文件")
+    async def delete_file(
+        file_id: int,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        """删除指定文件（包括磁盘文件）"""
+        try:
+            doc = db.query(Document).filter(
+                Document.id == file_id,
+                Document.user_id == current_user.id
+            ).first()
+
+            if not doc:
+                raise HTTPException(status_code=404, detail="文件不存在")
+
+            # 删除磁盘文件
+            delete_file_from_disk(doc.file_path)
+
+            # 删除数据库记录
+            db.delete(doc)
+            db.commit()
+
+            return {"message": "文件删除成功"}
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"文件删除失败: {str(e)}")
+
     @app.post("/classifyComplaint", response_model=ComplaintClassificationResponse, summary="投诉工单智能分类")
     async def classify_complaint_api(
         request: ComplaintClassificationRequest,
@@ -636,8 +829,10 @@ def register_routes(app):
     ):
         """
         统一对话接口：自动识别用户意图并路由到对应功能模块
+        如果指定了 file_id，则先读取文件内容附加到对话中
         """
         session_id = request.session_id
+        file_id = request.file_id
 
         # 如果没有提供 session_id，自动创建新会话
         if not session_id:
@@ -650,27 +845,48 @@ def register_routes(app):
             db.add(session)
             db.commit()
 
+        # 处理文件引用：将文件内容附加到用户输入前用于AI处理
+        effective_content = request.content
+        file_info = None
+        if file_id:
+            doc = db.query(Document).filter(
+                Document.id == file_id,
+                Document.user_id == current_user.id
+            ).first()
+            if not doc:
+                raise HTTPException(status_code=404, detail="引用的文件不存在")
+            if not doc.extracted_text:
+                raise HTTPException(status_code=400, detail="该文件内容为空，无法读取")
+            # 将文件内容附加到用户输入前（仅用于AI处理）
+            effective_content = f"【文件内容：{doc.original_filename}】\n{doc.extracted_text}\n\n{request.content}"
+            # 保存文件信息用于存储
+            file_info = {
+                "id": doc.id,
+                "filename": doc.original_filename,
+                "file_type": doc.file_type,
+            }
+
         # 1. 意图识别
-        intent_result = classify_intent_local(request.content)
+        intent_result = classify_intent_local(effective_content)
         intent = intent_result["intent"]
         confidence = intent_result["confidence"]
 
         # 2. 路由
         if intent == "extract":
-            return await _handle_extract(request, current_user, db, intent, confidence, session_id)
+            return await _handle_extract(effective_content, request.content, current_user, db, intent, confidence, session_id, request.use_rag, file_info)
         elif intent == "complaint":
-            return await _handle_complaint(request, current_user, db, intent, confidence, session_id)
+            return await _handle_complaint(effective_content, request.content, current_user, db, intent, confidence, session_id, file_info)
         elif intent == "knowledge":
-            return await _handle_knowledge(request, current_user, db, intent, confidence, session_id)
+            return await _handle_knowledge(effective_content, request.content, current_user, db, intent, confidence, session_id, file_info)
         else:
-            return await _handle_chat(request, current_user, db, intent, confidence, session_id)
+            return await _handle_chat(effective_content, request.content, current_user, db, intent, confidence, session_id, request.use_rag, file_info)
 
-    async def _handle_extract(request, current_user, db, intent, confidence, session_id):
+    async def _handle_extract(ai_content, original_content, current_user, db, intent, confidence, session_id, use_rag=False, file_info=None):
         try:
             ai_config = _get_user_ai_config(current_user.id, db)
             result = extract_with_llm(
-                request.content,
-                use_rag=request.use_rag,
+                ai_content,
+                use_rag=use_rag,
                 user_id=current_user.id,
                 ai_config=ai_config,
             )
@@ -683,25 +899,27 @@ def register_routes(app):
                 session_id=session_id,
             )
 
+            # 存储时使用原始内容，如果有文件引用则添加标记
+            input_text = f"[引用文件] {original_content}" if file_info else original_content
             conversation = Conversation(
                 user_id=current_user.id,
                 session_id=session_id,
                 module="extract",
-                input_text=request.content,
+                input_text=input_text,
                 output_data=json.dumps(result, ensure_ascii=False),
             )
             db.add(conversation)
-            _update_session_name(db, session_id, request.content)
+            _update_session_name(db, session_id, input_text)
             db.commit()
 
             return response
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"信息抽取失败: {str(e)}")
 
-    async def _handle_complaint(request, current_user, db, intent, confidence, session_id):
+    async def _handle_complaint(ai_content, original_content, current_user, db, intent, confidence, session_id, file_info=None):
         try:
             ai_config = _get_user_ai_config(current_user.id, db)
-            result = classify_complaint(request.content, ai_config=ai_config)
+            result = classify_complaint(ai_content, ai_config=ai_config)
             response = ChatResponse(
                 intent=intent,
                 confidence=confidence,
@@ -711,24 +929,25 @@ def register_routes(app):
                 session_id=session_id,
             )
 
+            input_text = f"[引用文件] {original_content}" if file_info else original_content
             conversation = Conversation(
                 user_id=current_user.id,
                 session_id=session_id,
                 module="complaint",
-                input_text=request.content,
+                input_text=input_text,
                 output_data=json.dumps(result, ensure_ascii=False),
             )
             db.add(conversation)
-            _update_session_name(db, session_id, request.content)
+            _update_session_name(db, session_id, input_text)
             db.commit()
 
             return response
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"投诉分类失败: {str(e)}")
 
-    async def _handle_knowledge(request, current_user, db, intent, confidence, session_id):
+    async def _handle_knowledge(ai_content, original_content, current_user, db, intent, confidence, session_id, file_info=None):
         try:
-            doc_id = vector_db.add_document(request.content, current_user.id)
+            doc_id = vector_db.add_document(ai_content, current_user.id)
             response = ChatResponse(
                 intent=intent,
                 confidence=confidence,
@@ -738,57 +957,72 @@ def register_routes(app):
                 session_id=session_id,
             )
 
+            input_text = f"[引用文件] {original_content}" if file_info else original_content
             conversation = Conversation(
                 user_id=current_user.id,
                 session_id=session_id,
                 module="knowledge",
-                input_text=request.content,
+                input_text=input_text,
                 output_data=json.dumps({"doc_id": doc_id}, ensure_ascii=False),
             )
             db.add(conversation)
-            _update_session_name(db, session_id, request.content)
+            _update_session_name(db, session_id, input_text)
             db.commit()
 
             return response
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"添加知识失败: {str(e)}")
 
-    async def _handle_chat(request, current_user, db, intent, confidence, session_id):
-        """处理闲聊/通用对话意图 - 基于知识库RAG问答"""
+    async def _handle_chat(ai_content, original_content, current_user, db, intent, confidence, session_id, use_rag=False, file_info=None):
+        """处理闲聊/通用对话意图 - 当开启RAG时基于知识库问答，否则直接调用LLM"""
         try:
             ai_config = _get_user_ai_config(current_user.id, db)
-            result = answer_with_knowledge(request.content, current_user.id, top_k=3, ai_config=ai_config)
+
+            if use_rag:
+                result = answer_with_knowledge(ai_content, current_user.id, top_k=3, ai_config=ai_config)
+                chat_data = {
+                    "answer": result["answer"],
+                    "references": result["references"],
+                    "has_knowledge": result["has_knowledge"]
+                }
+                message = "知识库问答完成"
+            else:
+                result = direct_chat(ai_content, ai_config)
+                chat_data = {
+                    "answer": result,
+                    "references": [],
+                    "has_knowledge": False
+                }
+                message = "AI 回复完成"
+
+            # 如果是读取文件操作，添加文件信息
+            if file_info:
+                chat_data["file_reference"] = file_info
+
             response = ChatResponse(
                 intent=intent,
                 confidence=confidence,
                 module="chat",
-                data={
-                    "answer": result["answer"],
-                    "references": result["references"],
-                    "has_knowledge": result["has_knowledge"]
-                },
-                message="知识库问答完成",
+                data=chat_data,
+                message=message,
                 session_id=session_id,
             )
 
+            input_text = f"[引用文件] {original_content}" if file_info else original_content
             conversation = Conversation(
                 user_id=current_user.id,
                 session_id=session_id,
                 module="chat",
-                input_text=request.content,
-                output_data=json.dumps({
-                    "answer": result["answer"],
-                    "references": result["references"],
-                    "has_knowledge": result["has_knowledge"]
-                }, ensure_ascii=False),
+                input_text=input_text,
+                output_data=json.dumps(chat_data, ensure_ascii=False),
             )
             db.add(conversation)
-            _update_session_name(db, session_id, request.content)
+            _update_session_name(db, session_id, input_text)
             db.commit()
 
             return response
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"知识库问答失败: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"对话失败: {str(e)}")
 
     def _update_session_name(db: Session, session_id: str, first_message: str):
         """自动用第一条消息作为会话名，并更新会话时间戳"""
