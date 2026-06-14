@@ -7,7 +7,7 @@ from app.config import HOST, PORT, LOG_LEVEL, RELOAD
 from app.routes import register_routes
 
 # 创建 FastAPI 应用
-app = FastAPI(title="Insurance Policy Info Extraction API")
+app = FastAPI(title="TestAssistant AI API")
 
 # 配置 CORS 跨域（局域网访问）
 app.add_middleware(

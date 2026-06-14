@@ -1,4 +1,4 @@
-"""API 路由定义模块"""
+"""API 路由定义模块 - TestAssistant AI"""
 import json
 import os
 import tempfile
@@ -14,22 +14,24 @@ from app.database import get_db, init_db
 from app.models import User, Session as SessionModel, Conversation, ModelConfig, UserActiveModel, Document
 from app.auth import hash_password, verify_password, create_access_token, get_current_user
 from app.schemas import (
-    ExtractRequest, ExtractResponse, FileExtractRequest,
-    ComplaintClassificationRequest, ComplaintClassificationResponse, ClassificationResult,
-    AddKnowledgeRequest, SearchRequest, SearchResponse, KnowledgeStatsResponse,
-    RegisterRequest, LoginRequest, AuthResponse, UserInfo,
+    LoginRequest, RegisterRequest, AuthResponse, UserInfo,
     ConversationRecord, ConversationHistoryResponse,
-    ChatRequest, ChatResponse,
     SessionInfo, SessionListResponse, CreateSessionRequest, UpdateSessionRequest,
-    SupportedPlatform, ModelConfigInfo, ModelListResponse,
-    AddModelRequest, UpdateModelRequest, TestAIRequest, TestAIResponse, ActiveModelResponse,
-    FileInfo, FileUploadResponse, FileReadResponse,
+    ChatRequest, ChatResponse,
+    FileUploadResponse, FileReadResponse,
+    SearchRequest, SearchResponse, KnowledgeStatsResponse,
+    AddKnowledgeRequest,
+    SupportedPlatform, ModelConfigInfo, ModelGroup,
+    ModelListResponse, AddModelRequest, UpdateModelRequest, TestAIRequest,
+    TestAIResponse, ActiveModelResponse,
+    FileInfo,
+    TestTaskRequest, TestTaskResponse, TestStep,
+    CodeIssue, CodeModifyRequest,
+    CodeAnalysisRequest, CodeAnalysisResponse,
+    TestCaseRequest, TestCaseResponse,
 )
-from app.policy_extractor import extract_with_llm
-from app.complaint_classifier import classify_complaint
 from app.intent_classifier import classify_intent_local
 from app.knowledge_qa import answer_with_knowledge, direct_chat
-from app.prompts import BUSINESS_CATEGORIES, COMPLAINT_REASONS
 from app.vector_db import vector_db
 from app.file_parser import parse_file
 from app.file_storage import save_file, delete_file as delete_file_from_disk, get_user_upload_dir
@@ -110,7 +112,6 @@ def register_routes(app):
         """创建新会话"""
         session_id = uuid.uuid4().hex[:16]
 
-        # 用输入名或第一条对话作为会话名
         session = SessionModel(
             user_id=current_user.id,
             session_id=session_id,
@@ -179,8 +180,8 @@ def register_routes(app):
         "openai": {"name": "OpenAI", "icon": "🟢", "default_base_url": "https://api.openai.com/v1"},
         "qwen": {"name": "通义千问", "icon": "💎", "default_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"},
         "kimi": {"name": "Kimi", "icon": "", "default_base_url": "https://api.moonshot.cn/v1"},
-        "zhipu": {"name": "智谱 AI", "icon": "🧠", "default_base_url": "https://open.bigmodel.cn/api/paas/v4"},
-        "custom": {"name": "自定义", "icon": "️", "default_base_url": ""},
+        "zhipu": {"name": "智谱 AI", "icon": "", "default_base_url": "https://open.bigmodel.cn/api/paas/v4"},
+        "custom": {"name": "自定义", "icon": "⚙", "default_base_url": ""},
     }
 
     def _mask_api_key(key: str) -> str:
@@ -190,7 +191,7 @@ def register_routes(app):
         return key[:4] + "****" + key[-4:]
 
     def _get_user_ai_config(user_id: int, db: Session) -> dict:
-        """获取用户当前使用的 AI 配置，用户必须手动配置模型"""
+        """获取用户当前使用的 AI 配置"""
         active = db.query(UserActiveModel).filter_by(user_id=user_id).first()
 
         if active and active.model_config_id:
@@ -202,7 +203,6 @@ def register_routes(app):
                     "chat_model": mc.model_name,
                 }
 
-        # 用户未配置模型，返回空配置
         return {
             "api_key": "",
             "api_base_url": "",
@@ -257,10 +257,10 @@ def register_routes(app):
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db),
     ):
-        """添加模型配置（用户添加的模型统一标记为自定义）"""
+        """添加模型配置"""
         mc = ModelConfig(
             user_id=current_user.id,
-            platform="custom",  # 用户添加的模型统一标记为自定义
+            platform="custom",
             api_key=request.api_key,
             api_base_url=request.api_base_url,
             model_name=request.model_name,
@@ -269,7 +269,6 @@ def register_routes(app):
         db.commit()
         db.refresh(mc)
 
-        # 如果是第一个配置，自动设为活跃模型
         active = db.query(UserActiveModel).filter_by(user_id=current_user.id).first()
         if not active:
             active = UserActiveModel(user_id=current_user.id, model_config_id=mc.id)
@@ -336,7 +335,6 @@ def register_routes(app):
         if not mc:
             raise HTTPException(status_code=404, detail="模型配置不存在")
 
-        # 如果正在使用此模型，取消活跃
         active = db.query(UserActiveModel).filter_by(user_id=current_user.id, model_config_id=config_id).first()
         if active:
             db.delete(active)
@@ -470,95 +468,6 @@ def register_routes(app):
         db.commit()
         return {"message": "对话记录已删除"}
 
-    # ==================== 业务接口（需认证） ====================
-
-    @app.post("/extractPolicyInfo", response_model=ExtractResponse)
-    async def extract_policy_info(
-        request: ExtractRequest,
-        current_user: User = Depends(get_current_user),
-        db: Session = Depends(get_db),
-    ):
-        try:
-            ai_config = _get_user_ai_config(current_user.id, db)
-            result = extract_with_llm(
-                request.content,
-                use_rag=request.use_rag,
-                user_id=current_user.id,
-                ai_config=ai_config,
-            )
-            response = ExtractResponse(**result)
-
-            conversation = Conversation(
-                user_id=current_user.id,
-                session_id=request.session_id,
-                module="extract",
-                input_text=request.content,
-                output_data=json.dumps(result, ensure_ascii=False),
-            )
-            db.add(conversation)
-            db.commit()
-
-            return response
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"信息抽取失败: {str(e)}")
-
-    @app.post("/extractPolicyInfo/file", response_model=ExtractResponse, summary="从文件提取保单信息")
-    async def extract_policy_info_from_file(
-        file: UploadFile = File(...),
-        use_rag: bool = Form(False),
-        session_id: str = Form(None),
-        current_user: User = Depends(get_current_user),
-        db: Session = Depends(get_db),
-    ):
-        """从上传的 PDF 文件中提取保单信息"""
-        try:
-            # 验证文件类型
-            if not file.filename or not file.filename.lower().endswith('.pdf'):
-                raise HTTPException(status_code=400, detail="仅支持 PDF 文件")
-
-            # 保存文件到临时目录
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-                content = await file.read()
-                tmp_file.write(content)
-                tmp_file_path = tmp_file.name
-
-            try:
-                # 解析文件提取文本
-                extracted_text = parse_file(tmp_file_path, file.filename)
-                if not extracted_text.strip():
-                    raise HTTPException(status_code=400, detail="文件中未找到可读取的文本内容")
-
-                # 调用现有的 LLM 提取
-                ai_config = _get_user_ai_config(current_user.id, db)
-                result = extract_with_llm(
-                    extracted_text,
-                    use_rag=use_rag,
-                    user_id=current_user.id,
-                    ai_config=ai_config,
-                )
-                response = ExtractResponse(**result)
-
-                # 保存对话记录（存储原始文件名和解析后的文本）
-                conversation = Conversation(
-                    user_id=current_user.id,
-                    session_id=session_id,
-                    module="extract",
-                    input_text=f"[文件: {file.filename}]\n{extracted_text[:500]}",
-                    output_data=json.dumps(result, ensure_ascii=False),
-                )
-                db.add(conversation)
-                db.commit()
-
-                return response
-            finally:
-                # 清理临时文件
-                if os.path.exists(tmp_file_path):
-                    os.remove(tmp_file_path)
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"文件提取失败: {str(e)}")
-
     # ==================== 文件管理接口 ====================
 
     @app.post("/files/upload", summary="上传文件")
@@ -572,15 +481,12 @@ def register_routes(app):
             if not file.filename:
                 raise HTTPException(status_code=400, detail="文件名不能为空")
 
-            # 读取文件内容
             file_bytes = await file.read()
             if not file_bytes:
                 raise HTTPException(status_code=400, detail="文件不能为空")
 
-            # 保存文件并提取文本
             file_info = save_file(file_bytes, file.filename, current_user.id)
 
-            # 保存到数据库
             doc = Document(
                 user_id=current_user.id,
                 original_filename=file_info["original_filename"],
@@ -677,10 +583,8 @@ def register_routes(app):
             if not doc:
                 raise HTTPException(status_code=404, detail="文件不存在")
 
-            # 删除磁盘文件
             delete_file_from_disk(doc.file_path)
 
-            # 删除数据库记录
             db.delete(doc)
             db.commit()
 
@@ -690,51 +594,124 @@ def register_routes(app):
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"文件删除失败: {str(e)}")
 
-    @app.post("/classifyComplaint", response_model=ComplaintClassificationResponse, summary="投诉工单智能分类")
-    async def classify_complaint_api(
-        request: ComplaintClassificationRequest,
+    # ==================== 代码分析接口 ====================
+
+    @app.post("/code/analyze", response_model=CodeAnalysisResponse, summary="代码分析")
+    async def analyze_code(
+        request: CodeAnalysisRequest,
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db),
     ):
+        """对提交的代码进行智能分析，发现潜在问题"""
         try:
             ai_config = _get_user_ai_config(current_user.id, db)
-            result = classify_complaint(request.content, ai_config=ai_config)
-            response = ComplaintClassificationResponse(result=ClassificationResult(**result))
+            from openai import OpenAI
 
+            client = OpenAI(api_key=ai_config["api_key"], base_url=ai_config.get("api_base_url", "https://api.openai.com/v1"))
+            from app.prompts import CODE_ANALYSIS_PROMPT
+
+            response = client.chat.completions.create(
+                model=ai_config["chat_model"],
+                messages=[
+                    {"role": "system", "content": CODE_ANALYSIS_PROMPT},
+                    {"role": "user", "content": request.code}
+                ],
+                temperature=0.3,
+                max_tokens=2000,
+            )
+
+            result_text = response.choices[0].message.content
+            result = {"analysis": result_text}
+
+            # 保存对话记录
             conversation = Conversation(
                 user_id=current_user.id,
                 session_id=request.session_id,
-                module="complaint",
-                input_text=request.content,
+                module="code",
+                input_text=request.code[:500],
                 output_data=json.dumps(result, ensure_ascii=False),
             )
             db.add(conversation)
+            _update_session_name(db, request.session_id, f"代码分析: {request.code[:20]}")
             db.commit()
 
-            return response
+            return CodeAnalysisResponse(
+                intent="code",
+                confidence=0.9,
+                module="code",
+                data=result,
+                message="代码分析完成",
+                session_id=request.session_id,
+            )
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"投诉分类失败: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"代码分析失败: {str(e)}")
 
-    @app.get("/complaint/categories", summary="获取业务分类枚举")
-    async def get_business_categories():
-        return {"categories": BUSINESS_CATEGORIES}
+    # ==================== 测试用例生成接口 ====================
 
-    @app.get("/complaint/reasons", summary="获取投诉原因枚举")
-    async def get_complaint_reasons():
-        return {"reasons": COMPLAINT_REASONS}
+    @app.post("/case/generate", response_model=TestCaseResponse, summary="测试用例生成")
+    async def generate_test_case(
+        request: TestCaseRequest,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        """根据功能描述生成完整的测试用例"""
+        try:
+            ai_config = _get_user_ai_config(current_user.id, db)
+            from openai import OpenAI
 
-    @app.post("/knowledge/add", summary="添加知识文档")
+            client = OpenAI(api_key=ai_config["api_key"], base_url=ai_config.get("api_base_url", "https://api.openai.com/v1"))
+            from app.prompts import TEST_CASE_PROMPT
+
+            response = client.chat.completions.create(
+                model=ai_config["chat_model"],
+                messages=[
+                    {"role": "system", "content": TEST_CASE_PROMPT},
+                    {"role": "user", "content": request.feature_description}
+                ],
+                temperature=0.5,
+                max_tokens=4000,
+            )
+
+            result_text = response.choices[0].message.content
+            result = {"cases": result_text, "total": 1}
+
+            # 保存对话记录
+            conversation = Conversation(
+                user_id=current_user.id,
+                session_id=request.session_id,
+                module="case",
+                input_text=request.feature_description,
+                output_data=json.dumps(result, ensure_ascii=False),
+            )
+            db.add(conversation)
+            _update_session_name(db, request.session_id, f"用例生成: {request.feature_description[:20]}")
+            db.commit()
+
+            return TestCaseResponse(
+                intent="case",
+                confidence=0.9,
+                module="case",
+                data=result,
+                message="测试用例生成完成",
+                session_id=request.session_id,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"测试用例生成失败: {str(e)}")
+
+    # ==================== 测试文档库接口 ====================
+
+    @app.post("/knowledge/add", summary="添加测试文档")
     async def add_knowledge(
         request: AddKnowledgeRequest,
         current_user: User = Depends(get_current_user),
     ):
         try:
             doc_id = vector_db.add_document(request.content, current_user.id, request.metadata)
-            return {"message": "知识文档添加成功", "doc_id": doc_id}
+            return {"message": "测试文档添加成功", "doc_id": doc_id}
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"添加知识失败: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"添加测试文档失败: {str(e)}")
 
-    @app.post("/knowledge/search", response_model=SearchResponse, summary="搜索知识")
+    @app.post("/knowledge/search", response_model=SearchResponse, summary="搜索测试文档")
     async def search_knowledge(
         request: SearchRequest,
         current_user: User = Depends(get_current_user),
@@ -750,13 +727,13 @@ def register_routes(app):
                 for r in results
             ])
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"搜索知识失败: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"搜索测试文档失败: {str(e)}")
 
-    @app.get("/knowledge/stats", response_model=KnowledgeStatsResponse, summary="知识库统计")
+    @app.get("/knowledge/stats", response_model=KnowledgeStatsResponse, summary="测试文档统计")
     async def knowledge_stats(current_user: User = Depends(get_current_user)):
         return vector_db.get_stats(current_user.id)
 
-    @app.delete("/knowledge/{doc_id}", summary="删除知识文档")
+    @app.delete("/knowledge/{doc_id}", summary="删除测试文档")
     async def delete_knowledge(
         doc_id: str,
         current_user: User = Depends(get_current_user),
@@ -766,12 +743,12 @@ def register_routes(app):
             raise HTTPException(status_code=404, detail=f"文档 {doc_id} 不存在")
         return {"message": f"文档 {doc_id} 已删除"}
 
-    @app.delete("/knowledge/clear", summary="清空知识库")
+    @app.delete("/knowledge/clear", summary="清空测试文档库")
     async def clear_knowledge(current_user: User = Depends(get_current_user)):
         vector_db.clear_all(current_user.id)
-        return {"message": "知识库已清空"}
+        return {"message": "测试文档库已清空"}
 
-    @app.get("/knowledge/list", summary="获取知识库列表")
+    @app.get("/knowledge/list", summary="获取测试文档列表")
     async def list_knowledge(
         current_user: User = Depends(get_current_user),
     ):
@@ -793,9 +770,9 @@ def register_routes(app):
 
             return {"knowledge": knowledge_list, "total": len(knowledge_list)}
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"获取知识库列表失败: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"获取测试文档列表失败: {str(e)}")
 
-    @app.put("/knowledge/{doc_id}", summary="编辑知识内容")
+    @app.put("/knowledge/{doc_id}", summary="编辑测试文档")
     async def update_knowledge(
         doc_id: str,
         request: AddKnowledgeRequest,
@@ -813,11 +790,11 @@ def register_routes(app):
                 ids=[doc_id],
                 metadatas=[request.metadata if request.metadata else {"updated": "true"}]
             )
-            return {"message": "知识文档更新成功", "doc_id": doc_id}
+            return {"message": "测试文档更新成功", "doc_id": doc_id}
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"更新知识失败: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"更新测试文档失败: {str(e)}")
 
     # ==================== 统一对话入口 ====================
 
@@ -829,7 +806,6 @@ def register_routes(app):
     ):
         """
         统一对话接口：自动识别用户意图并路由到对应功能模块
-        如果指定了 file_id，则先读取文件内容附加到对话中
         """
         session_id = request.session_id
         file_id = request.file_id
@@ -845,7 +821,7 @@ def register_routes(app):
             db.add(session)
             db.commit()
 
-        # 处理文件引用：将文件内容附加到用户输入前用于AI处理
+        # 处理文件引用
         effective_content = request.content
         file_info = None
         if file_id:
@@ -857,9 +833,7 @@ def register_routes(app):
                 raise HTTPException(status_code=404, detail="引用的文件不存在")
             if not doc.extracted_text:
                 raise HTTPException(status_code=400, detail="该文件内容为空，无法读取")
-            # 将文件内容附加到用户输入前（仅用于AI处理）
             effective_content = f"【文件内容：{doc.original_filename}】\n{doc.extracted_text}\n\n{request.content}"
-            # 保存文件信息用于存储
             file_info = {
                 "id": doc.id,
                 "filename": doc.original_filename,
@@ -872,39 +846,41 @@ def register_routes(app):
         confidence = intent_result["confidence"]
 
         # 2. 路由
-        if intent == "extract":
-            return await _handle_extract(effective_content, request.content, current_user, db, intent, confidence, session_id, request.use_rag, file_info)
-        elif intent == "complaint":
-            return await _handle_complaint(effective_content, request.content, current_user, db, intent, confidence, session_id, file_info)
+        if intent == "code":
+            return await _handle_code_analysis(effective_content, request.content, current_user, db, intent, confidence, session_id, file_info)
+        elif intent == "case":
+            return await _handle_test_case(effective_content, request.content, current_user, db, intent, confidence, session_id, file_info)
         elif intent == "knowledge":
             return await _handle_knowledge(effective_content, request.content, current_user, db, intent, confidence, session_id, file_info)
         else:
             return await _handle_chat(effective_content, request.content, current_user, db, intent, confidence, session_id, request.use_rag, file_info)
 
-    async def _handle_extract(ai_content, original_content, current_user, db, intent, confidence, session_id, use_rag=False, file_info=None):
+    async def _handle_code_analysis(ai_content, original_content, current_user, db, intent, confidence, session_id, file_info=None):
+        """处理代码分析意图"""
         try:
             ai_config = _get_user_ai_config(current_user.id, db)
-            result = extract_with_llm(
-                ai_content,
-                use_rag=use_rag,
-                user_id=current_user.id,
-                ai_config=ai_config,
-            )
-            response = ChatResponse(
-                intent=intent,
-                confidence=confidence,
-                module="extract",
-                data=result,
-                message="保单信息提取成功",
-                session_id=session_id,
+            from openai import OpenAI
+
+            client = OpenAI(api_key=ai_config["api_key"], base_url=ai_config.get("api_base_url", "https://api.openai.com/v1"))
+            from app.prompts import CODE_ANALYSIS_PROMPT
+
+            response = client.chat.completions.create(
+                model=ai_config["chat_model"],
+                messages=[
+                    {"role": "system", "content": CODE_ANALYSIS_PROMPT},
+                    {"role": "user", "content": ai_content}
+                ],
+                temperature=0.3,
+                max_tokens=2000,
             )
 
-            # 存储时使用原始内容，如果有文件引用则添加标记
+            result = {"analysis": response.choices[0].message.content}
+
             input_text = f"[引用文件] {original_content}" if file_info else original_content
             conversation = Conversation(
                 user_id=current_user.id,
                 session_id=session_id,
-                module="extract",
+                module="code",
                 input_text=input_text,
                 output_data=json.dumps(result, ensure_ascii=False),
             )
@@ -912,28 +888,43 @@ def register_routes(app):
             _update_session_name(db, session_id, input_text)
             db.commit()
 
-            return response
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"信息抽取失败: {str(e)}")
-
-    async def _handle_complaint(ai_content, original_content, current_user, db, intent, confidence, session_id, file_info=None):
-        try:
-            ai_config = _get_user_ai_config(current_user.id, db)
-            result = classify_complaint(ai_content, ai_config=ai_config)
-            response = ChatResponse(
+            return ChatResponse(
                 intent=intent,
                 confidence=confidence,
-                module="complaint",
+                module="code",
                 data=result,
-                message="投诉工单分类完成",
+                message="代码分析完成",
                 session_id=session_id,
             )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"代码分析失败: {str(e)}")
+
+    async def _handle_test_case(ai_content, original_content, current_user, db, intent, confidence, session_id, file_info=None):
+        """处理测试用例生成意图"""
+        try:
+            ai_config = _get_user_ai_config(current_user.id, db)
+            from openai import OpenAI
+
+            client = OpenAI(api_key=ai_config["api_key"], base_url=ai_config.get("api_base_url", "https://api.openai.com/v1"))
+            from app.prompts import TEST_CASE_PROMPT
+
+            response = client.chat.completions.create(
+                model=ai_config["chat_model"],
+                messages=[
+                    {"role": "system", "content": TEST_CASE_PROMPT},
+                    {"role": "user", "content": ai_content}
+                ],
+                temperature=0.5,
+                max_tokens=4000,
+            )
+
+            result = {"cases": response.choices[0].message.content, "total": 1}
 
             input_text = f"[引用文件] {original_content}" if file_info else original_content
             conversation = Conversation(
                 user_id=current_user.id,
                 session_id=session_id,
-                module="complaint",
+                module="case",
                 input_text=input_text,
                 output_data=json.dumps(result, ensure_ascii=False),
             )
@@ -941,9 +932,16 @@ def register_routes(app):
             _update_session_name(db, session_id, input_text)
             db.commit()
 
-            return response
+            return ChatResponse(
+                intent=intent,
+                confidence=confidence,
+                module="case",
+                data=result,
+                message="测试用例生成完成",
+                session_id=session_id,
+            )
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"投诉分类失败: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"测试用例生成失败: {str(e)}")
 
     async def _handle_knowledge(ai_content, original_content, current_user, db, intent, confidence, session_id, file_info=None):
         try:
@@ -953,7 +951,7 @@ def register_routes(app):
                 confidence=confidence,
                 module="knowledge",
                 data={"doc_id": doc_id},
-                message="知识已添加到您的知识库",
+                message="测试文档已添加",
                 session_id=session_id,
             )
 
@@ -971,10 +969,10 @@ def register_routes(app):
 
             return response
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"添加知识失败: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"添加测试文档失败: {str(e)}")
 
     async def _handle_chat(ai_content, original_content, current_user, db, intent, confidence, session_id, use_rag=False, file_info=None):
-        """处理闲聊/通用对话意图 - 当开启RAG时基于知识库问答，否则直接调用LLM"""
+        """处理闲聊/通用对话意图"""
         try:
             ai_config = _get_user_ai_config(current_user.id, db)
 
@@ -985,7 +983,7 @@ def register_routes(app):
                     "references": result["references"],
                     "has_knowledge": result["has_knowledge"]
                 }
-                message = "知识库问答完成"
+                message = "测试文档问答完成"
             else:
                 result = direct_chat(ai_content, ai_config)
                 chat_data = {
@@ -995,7 +993,6 @@ def register_routes(app):
                 }
                 message = "AI 回复完成"
 
-            # 如果是读取文件操作，添加文件信息
             if file_info:
                 chat_data["file_reference"] = file_info
 
@@ -1030,13 +1027,190 @@ def register_routes(app):
             SessionModel.session_id == session_id
         ).first()
         if session:
-            # 如果是新会话，用第一条消息作为会话名
             if session.name == "新会话":
                 session.name = first_message[:20] + ("..." if len(first_message) > 20 else "")
-            # 每次对话都更新时间戳
             session.updated_at = datetime.now(timezone.utc)
 
     # 前端首页（公开）
     @app.get("/")
     async def root():
         return FileResponse(frontend_dir / "index.html")
+
+    # ========== Web 测试 Agent 相关路由 ==========
+
+    @app.post("/test/run", summary="执行Web自动化测试任务")
+    async def run_test_task(
+        request: TestTaskRequest,
+        db: Session = Depends(get_db),
+        current_user: User = Depends(get_current_user),
+    ):
+        """执行Web自动化测试任务"""
+        user_ai_config = db.query(ModelConfig).filter(
+            ModelConfig.user_id == current_user.id,
+            ModelConfig.is_active == True
+        ).first()
+
+        if not user_ai_config:
+            return {"error": "请先在AI模型配置页面添加并启用一个AI模型"}
+
+        ai_config = {
+            "api_key": user_ai_config.api_key,
+            "api_base_url": user_ai_config.api_base_url or "https://api.openai.com/v1",
+            "chat_model": user_ai_config.model_name,
+        }
+
+        import asyncio
+        from app.test_engine import run_test_task as engine_run_task
+
+        task_result = await engine_run_task(
+            target_url=request.target_url,
+            project_path=request.project_path,
+            test_goals=request.test_goals,
+            ai_config=ai_config,
+            max_steps=request.max_steps,
+        )
+
+        if "error" in task_result:
+            raise HTTPException(status_code=400, detail=task_result["error"])
+
+        steps = []
+        for s in task_result.get("steps", []):
+            steps.append(TestStep(**s))
+
+        code_issues = []
+        for ci in task_result.get("code_issues", []):
+            code_issues.append(CodeIssue(**ci))
+
+        errors_count = sum(
+            1 for s in task_result["steps"]
+            if s.get("console_errors") or s.get("network_errors") or not s.get("success")
+        )
+
+        screenshots_count = sum(
+            1 for s in task_result["steps"]
+            if s.get("screenshot")
+        )
+
+        return TestTaskResponse(
+            task_id=task_result["task_id"],
+            target_url=task_result["target_url"],
+            status=task_result["status"],
+            steps=steps,
+            errors_found=errors_count,
+            screenshots_saved=screenshots_count,
+            code_issues=code_issues,
+            message=task_result.get("message", ""),
+        )
+
+    @app.post("/test/code/fix", summary="确认代码修复")
+    async def confirm_code_fix(
+        request: CodeModifyRequest,
+        db: Session = Depends(get_db),
+        current_user: User = Depends(get_current_user),
+    ):
+        """用户确认是否修改代码"""
+        from app.test_engine import running_test_tasks
+        from app.code_analyzer import analyze_and_fix_code
+
+        task_data = running_test_tasks.get(request.task_id)
+        if not task_data:
+            raise HTTPException(status_code=404, detail="测试任务不存在")
+
+        user_ai_config = db.query(ModelConfig).filter(
+            ModelConfig.user_id == current_user.id,
+            ModelConfig.is_active == True
+        ).first()
+
+        if not user_ai_config:
+            raise HTTPException(status_code=400, detail="未配置AI模型")
+
+        ai_config = {
+            "api_key": user_ai_config.api_key,
+            "api_base_url": user_ai_config.api_base_url or "https://api.openai.com/v1",
+            "chat_model": user_ai_config.model_name,
+        }
+
+        issues = task_data.get("code_issues", [])
+        if request.issue_index >= len(issues):
+            raise HTTPException(status_code=404, detail="问题索引不存在")
+
+        issue = issues[request.issue_index]
+
+        fix_result = analyze_and_fix_code(
+            file_path=issue["file_path"],
+            line_number=issue.get("line_number", 0),
+            error_log=issue.get("error_log", ""),
+            issue_description=issue.get("issue_description", ""),
+            suggested_fix=issue.get("suggested_fix", ""),
+            ai_config=ai_config,
+            auto_fix=request.confirmed,
+        )
+
+        return {
+            "task_id": request.task_id,
+            "issue_index": request.issue_index,
+            "confirmed": request.confirmed,
+            "fix_result": fix_result,
+        }
+
+    @app.get("/test/tasks/{task_id}", summary="查询测试任务状态")
+    async def get_test_task(
+        task_id: str,
+        db: Session = Depends(get_db),
+        current_user: User = Depends(get_current_user),
+    ):
+        """查询测试任务当前状态"""
+        from app.test_engine import running_test_tasks
+
+        task_data = running_test_tasks.get(task_id)
+        if not task_data:
+            raise HTTPException(status_code=404, detail="测试任务不存在")
+
+        steps = []
+        for s in task_data.get("steps", []):
+            steps.append(TestStep(**s))
+
+        code_issues = []
+        for ci in task_data.get("code_issues", []):
+            code_issues.append(CodeIssue(**ci))
+
+        return TestTaskResponse(
+            task_id=task_data["task_id"],
+            target_url=task_data.get("target_url", ""),
+            status=task_data["status"],
+            steps=steps,
+            errors_found=sum(
+                1 for s in task_data["steps"]
+                if s.get("console_errors") or s.get("network_errors") or not s.get("success")
+            ),
+            screenshots_saved=sum(1 for s in task_data["steps"] if s.get("screenshot")),
+            code_issues=code_issues,
+            message=task_data.get("message", ""),
+        )
+
+    @app.post("/test/project/files", summary="获取项目文件列表")
+    async def get_project_files(
+        project_path: str,
+        db: Session = Depends(get_db),
+        current_user: User = Depends(get_current_user),
+    ):
+        """获取指定项目的文件列表"""
+        import os
+
+        if not os.path.isdir(project_path):
+            raise HTTPException(status_code=400, detail="项目路径不存在")
+
+        files = []
+        for root, dirs, filenames in os.walk(project_path):
+            dirs[:] = [d for d in dirs if not d.startswith(('.', '__pycache__', 'node_modules', '.git'))]
+            for f in filenames:
+                full_path = os.path.join(root, f)
+                ext = os.path.splitext(f)[1].lower()
+                if ext in ['.py', '.js', '.ts', '.tsx', '.jsx', '.vue', '.html', '.css', '.json', '.yaml', '.yml']:
+                    files.append({
+                        "path": full_path,
+                        "name": f,
+                        "size": os.path.getsize(full_path),
+                    })
+
+        return {"project_path": project_path, "files": files[:500]}

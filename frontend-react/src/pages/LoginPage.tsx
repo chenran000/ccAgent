@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { Shield } from 'lucide-react';
+import { Bug } from 'lucide-react';
 
 export default function LoginPage() {
   const { login, register } = useAuth();
@@ -39,10 +39,10 @@ export default function LoginPage() {
         <div className="bg-slate-900/90 backdrop-blur-xl border border-white/10 rounded-2xl p-8 shadow-2xl">
           <div className="text-center mb-8">
             <div className="inline-flex items-center justify-center w-14 h-14 bg-gradient-to-br from-blue-500 to-blue-700 rounded-xl mb-4">
-              <Shield className="w-7 h-7 text-white" />
+              <Bug className="w-7 h-7 text-white" />
             </div>
-            <h1 className="text-xl font-bold text-white">保险AI助手</h1>
-            <p className="text-sm text-slate-400 mt-1">智能保单提取与投诉分类系统</p>
+            <h1 className="text-xl font-bold text-white">TestAssistant AI</h1>
+            <p className="text-sm text-slate-400 mt-1">高级测试助手</p>
           </div>
 
           {error && (

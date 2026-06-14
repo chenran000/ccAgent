@@ -53,25 +53,32 @@ class CreateSessionRequest(BaseModel):
 class UpdateSessionRequest(BaseModel):
     name: str
 
-# ========== 保单信息提取相关模型 ==========
-class ExtractRequest(BaseModel):
-    content: str
-    use_rag: bool = False
+# ========== 代码分析相关模型 ==========
+
+class CodeAnalysisRequest(BaseModel):
+    code: str
     session_id: Optional[str] = None
 
-class ExtractRecord(BaseModel):
-    """单条提取记录"""
-    policyholder_name: str
-    policy_number: str
+class CodeAnalysisResponse(BaseModel):
+    intent: str
+    confidence: float
+    module: str
+    data: dict
+    message: str
+    session_id: str = ""
 
-class ExtractResponse(BaseModel):
-    records: List[ExtractRecord]
-    total: int
-
-# 文件提取相关模型
-class FileExtractRequest(BaseModel):
-    use_rag: bool = False
+# 测试用例生成相关模型
+class TestCaseRequest(BaseModel):
+    feature_description: str
     session_id: Optional[str] = None
+
+class TestCaseResponse(BaseModel):
+    intent: str
+    confidence: float
+    module: str
+    data: dict
+    message: str
+    session_id: str = ""
 
 # 文件管理相关模型
 class FileInfo(BaseModel):
@@ -118,38 +125,22 @@ class KnowledgeStatsResponse(BaseModel):
     total_docs: int
     index_ready: bool
 
-# 投诉分类相关模型
-class ComplaintClassificationRequest(BaseModel):
-    content: str
-    session_id: Optional[str] = None
-
-class ClassificationResult(BaseModel):
-    category: str
-    category_confidence: float
-    reason_primary: str
-    reason_primary_confidence: float
-    reason_secondary: str
-    reason_secondary_confidence: float
-
-class ComplaintClassificationResponse(BaseModel):
-    result: ClassificationResult
-
 # ========== 统一对话入口相关模型 ==========
 
 class ChatRequest(BaseModel):
     content: str
-    use_rag: bool = False  # 仅 extract 模块使用
-    session_id: Optional[str] = None  # 会话ID，可选
-    file_id: Optional[int] = None  # 引用的文件ID，可选
+    use_rag: bool = False
+    session_id: Optional[str] = None
+    file_id: Optional[int] = None
 
 class IntentResult(BaseModel):
-    intent: str           # extract / complaint / knowledge / chat
+    intent: str           # code / case / knowledge / chat
     confidence: float
 
 class ChatResponse(BaseModel):
     intent: str           # 识别的意图
     confidence: float     # 意图识别置信度
-    module: str           # 实际处理的模块 (extract/complaint/knowledge/chat)
+    module: str           # 实际处理的模块 (code/case/knowledge/chat)
     data: dict            # 模块返回的结果数据
     message: str          # 用户友好的提示信息
     session_id: str = ""  # 会话ID
@@ -215,3 +206,49 @@ class ActiveModelResponse(BaseModel):
     model_name: Optional[str] = None
     platform: Optional[str] = None
     use_default: bool
+
+# ========== Web 测试 Agent 相关模型 ==========
+
+class TestTaskRequest(BaseModel):
+    """Web测试任务请求"""
+    target_url: str  # 目标测试网址
+    project_path: str  # 本地项目代码路径
+    test_goals: List[str]  # 测试目标列表，如["测试登录功能", "测试搜索框"]
+    max_steps: int = 30  # 最大测试步骤数
+
+class TestStep(BaseModel):
+    """测试步骤"""
+    step: int
+    action: str  # click/type/wait/navigate/assert 等
+    target: str  # 操作目标描述
+    result: str  # 执行结果
+    success: bool  # 该步骤是否成功
+    screenshot: Optional[str] = None  # 截图(base64)
+    console_errors: List[str] = []  # Console错误
+    network_errors: List[str] = []  # Network错误
+
+class CodeIssue(BaseModel):
+    """代码问题定位"""
+    file_path: str  # 问题所在文件
+    line_number: int  # 问题行号
+    issue_description: str  # 问题描述
+    error_log: str  # 相关错误日志
+    suggested_fix: str  # 建议修复方案
+    code_snippet: Optional[str] = None  # 原始代码片段
+
+class TestTaskResponse(BaseModel):
+    """测试任务响应"""
+    task_id: str
+    target_url: str
+    status: str  # running/completed/failed/waiting_confirm
+    steps: List[TestStep]
+    errors_found: int  # 发现的错误数
+    screenshots_saved: int  # 保存的截图数
+    code_issues: List[CodeIssue] = []  # 代码问题定位
+    message: str
+
+class CodeModifyRequest(BaseModel):
+    """代码修改确认请求"""
+    task_id: str
+    issue_index: int
+    confirmed: bool  # True=同意修改, False=仅给建议

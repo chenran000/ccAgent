@@ -2,12 +2,14 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth, apiFetch } from '../context/AuthContext';
 import { API_BASE } from '../config';
 import {
-  Shield, LogOut, FileText, AlertTriangle, BookOpen, Send, Plus, Trash2,
+  LogOut, FileText, AlertTriangle, BookOpen, Send, Plus, Trash2,
   Loader2, Sparkles, Pencil, Save, X, MessageSquare, Zap, Settings,
-  FileUp
+  FileUp, Bug, CheckCircle, AlertCircle, ClipboardList, Globe, FolderOpen, Code, TestTube
 } from 'lucide-react';
 
-type ModuleType = 'extract' | 'complaint' | 'knowledge';
+import TestWorkspace from './TestWorkspace';
+
+type ModuleType = 'code' | 'case' | 'knowledge';
 
 interface Message {
   id: number;
@@ -43,21 +45,22 @@ interface FileItem {
 
 // Intent config for display
 const INTENT_CONFIG: Record<string, { icon: React.ReactNode; label: string; color: string }> = {
-  extract: { icon: <FileText className="w-3 h-3" />, label: '保单提取', color: 'bg-blue-500/20 text-blue-400 border-blue-500/30' },
-  complaint: { icon: <AlertTriangle className="w-3 h-3" />, label: '投诉分类', color: 'bg-orange-500/20 text-orange-400 border-orange-500/30' },
-  knowledge: { icon: <BookOpen className="w-3 h-3" />, label: '知识库', color: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' },
-  chat: { icon: <MessageSquare className="w-3 h-3" />, label: '对话', color: 'bg-purple-500/20 text-purple-400 border-purple-500/30' },
+  code: { icon: <Code className="w-3 h-3" />, label: '代码分析', color: 'bg-blue-500/20 text-blue-400 border-blue-500/30' },
+  case: { icon: <TestTube className="w-3 h-3" />, label: '用例生成', color: 'bg-purple-500/20 text-purple-400 border-purple-500/30' },
+  knowledge: { icon: <BookOpen className="w-3 h-3" />, label: '测试文档', color: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' },
+  chat: { icon: <MessageSquare className="w-3 h-3" />, label: '对话', color: 'bg-amber-500/20 text-amber-400 border-amber-500/30' },
 };
 
 const EXAMPLES = [
-  { icon: <FileText className="w-3.5 h-3.5" />, label: '提取保单', text: '帮我提取保单信息，投保人张三，保单号P1234567890' },
-  { icon: <AlertTriangle className="w-3.5 h-3.5" />, label: '投诉分类', text: '我要投诉理赔太慢了，等了两个月还没到账' },
-  { icon: <BookOpen className="w-3.5 h-3.5" />, label: '添加知识', text: '添加到知识库：车险理赔材料包括身份证、银行卡、事故认定书' },
-  { icon: <MessageSquare className="w-3.5 h-3.5" />, label: '随便聊聊', text: '你好，请问你能做什么？' },
+  { icon: <Code className="w-3.5 h-3.5" />, label: '分析代码', text: '帮我分析这段代码的边界条件和潜在bug' },
+  { icon: <TestTube className="w-3.5 h-3.5" />, label: '生成用例', text: '为登录功能生成测试用例，包含正常和异常场景' },
+  { icon: <BookOpen className="w-3.5 h-3.5" />, label: '添加文档', text: '添加到测试文档库：Web自动化测试规范' },
+  { icon: <MessageSquare className="w-3.5 h-3.5" />, label: '随便聊聊', text: '你好，请问你能帮我做什么测试工作？' },
 ];
 
 export default function ChatPage() {
   const { user, logout } = useAuth();
+  const [showWorkspace, setShowWorkspace] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
@@ -114,6 +117,20 @@ export default function ChatPage() {
   const pendingFileRef = useRef<File | null>(null);
   const [confirmUploadFile, setConfirmUploadFile] = useState<{name: string; size: number; type: string} | null>(null);
   const filePanelInputRef = useRef<HTMLInputElement>(null);
+
+  // Web Test Agent state
+  const [showTestPanel, setShowTestPanel] = useState(false);
+  const [testTargetUrl, setTestTargetUrl] = useState('');
+  const [testProjectPath, setTestProjectPath] = useState('');
+  const [testGoals, setTestGoals] = useState('');
+  const [isTestRunning, setIsTestRunning] = useState(false);
+  const [testTaskId, setTestTaskId] = useState<string | null>(null);
+  const [testStatus, setTestStatus] = useState<string>('');
+  const [testMessage, setTestMessage] = useState('');
+  const [testSteps, setTestSteps] = useState<any[]>([]);
+  const [testCodeIssues, setTestCodeIssues] = useState<any[]>([]);
+  const [testErrorsFound, setTestErrorsFound] = useState(0);
+  const [testScreenshotsSaved, setTestScreenshotsSaved] = useState(0);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -808,21 +825,83 @@ export default function ChatPage() {
     if (messages.length === 0) return;
     setShowClearChatConfirm(false);
     try {
-      // 只删除数据库中已存在的记录（ID < 10^13，临时ID是13位时间戳）
       const dbIds = messages.map(m => m.id).filter(id => id < 1000000000000);
       if (dbIds.length > 0) {
-        // 并行删除，忽略单个失败
         await Promise.allSettled(
           dbIds.map(id => apiFetch(`/conversations/${id}`, { method: 'DELETE' }))
         );
       }
-      // 直接清空本地状态
       setMessages([]);
       setTotalCount(0);
     } catch (e: any) {
-      // 即使部分删除失败，也清空本地
       setMessages([]);
       setTotalCount(0);
+    }
+  };
+
+  const handleTestRun = async () => {
+    if (!testTargetUrl.trim() || !testProjectPath.trim() || !testGoals.trim() || isTestRunning) return;
+    setIsTestRunning(true);
+    setTestSteps([]);
+    setTestCodeIssues([]);
+    setTestStatus('running');
+    setTestMessage('Web测试Agent正在执行...');
+
+    try {
+      const goals = testGoals.split('\n').map(g => g.trim()).filter(Boolean);
+      const res = await apiFetch('/test/run', {
+        method: 'POST',
+        body: JSON.stringify({
+          target_url: testTargetUrl.trim(),
+          project_path: testProjectPath.trim(),
+          test_goals: goals,
+          max_steps: 30,
+        }),
+      });
+      if (!res.ok) { const e = await res.json(); throw new Error(e.detail); }
+      const data = await res.json();
+
+      setTestTaskId(data.task_id);
+      setTestSteps(data.steps || []);
+      setTestCodeIssues(data.code_issues || []);
+      setTestStatus(data.status);
+      setTestMessage(data.message || '');
+      setTestErrorsFound(data.errors_found || 0);
+      setTestScreenshotsSaved(data.screenshots_saved || 0);
+    } catch (e: any) {
+      setTestStatus('failed');
+      setTestMessage('测试失败: ' + e.message);
+    } finally {
+      setIsTestRunning(false);
+    }
+  };
+
+  const handleCodeFix = async (issueIndex: number, confirmed: boolean) => {
+    if (!testTaskId) return;
+    try {
+      const res = await apiFetch('/test/code/fix', {
+        method: 'POST',
+        body: JSON.stringify({
+          task_id: testTaskId,
+          issue_index: issueIndex,
+          confirmed,
+        }),
+      });
+      if (!res.ok) { const e = await res.json(); throw new Error(e.detail); }
+      const data = await res.json();
+
+      if (confirmed) {
+        setTestMessage(`代码已自动修复: ${data.fix_result?.message || ''}`);
+      } else {
+        setTestMessage(`修复建议: ${data.fix_result?.fix_description || data.fix_result?.message || ''}`);
+      }
+
+      // Update the issue with fix result
+      setTestCodeIssues(prev => prev.map((issue, idx) =>
+        idx === issueIndex ? { ...issue, fix_result: data.fix_result } : issue
+      ));
+    } catch (e: any) {
+      alert('修复失败: ' + e.message);
     }
   };
 
@@ -834,11 +913,11 @@ export default function ChatPage() {
           <div className="p-5 border-b border-white/5">
             <div className="flex items-center gap-3">
               <button onClick={() => setShowKnowledge(false)} className="w-9 h-9 bg-gradient-to-br from-blue-500 to-blue-700 rounded-lg flex items-center justify-center hover:opacity-80 transition-opacity">
-                <Shield className="w-5 h-5 text-white" />
+                <Bug className="w-5 h-5 text-white" />
               </button>
               <div>
-                <h1 className="text-sm font-bold text-white">保险AI助手</h1>
-                <p className="text-[10px] text-slate-500">智能客服系统</p>
+                <h1 className="text-sm font-bold text-white">TestAssistant AI</h1>
+                <p className="text-[10px] text-slate-500">高级测试助手</p>
               </div>
             </div>
           </div>
@@ -866,7 +945,7 @@ export default function ChatPage() {
               className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm bg-gradient-to-r from-emerald-500 to-emerald-700 text-white shadow-lg shadow-emerald-500/20"
             >
               <BookOpen className="w-4 h-4" />
-              <span>知识库</span>
+              <span>测试文档库</span>
             </button>
           </nav>
           <div className="p-4 border-t border-white/5 space-y-3">
@@ -875,7 +954,7 @@ export default function ChatPage() {
               清空对话
             </button>
             <div className="p-3 bg-white/[0.03] rounded-lg border border-white/5">
-              <div className="text-[10px] text-slate-500 mb-1">知识库文档数</div>
+              <div className="text-[10px] text-slate-500 mb-1">测试文档数</div>
               <div className="text-lg font-bold text-emerald-400">{docCount}</div>
             </div>
           </div>
@@ -884,15 +963,15 @@ export default function ChatPage() {
         <main className="flex-1 flex flex-col min-w-0">
           <header className="px-6 py-4 border-b border-white/5 flex items-center justify-between">
             <div>
-              <h2 className="text-sm font-semibold text-white">知识库管理</h2>
-              <p className="text-xs text-slate-500 mt-0.5">共 {knowledgeList.length} 条知识文档</p>
+              <h2 className="text-sm font-semibold text-white">测试文档管理</h2>
+              <p className="text-xs text-slate-500 mt-0.5">共 {knowledgeList.length} 条测试文档</p>
             </div>
             <button
               onClick={() => { setShowAddKnowledge(true); setNewKnowledgeContent(''); }}
               className="px-4 py-2 bg-gradient-to-r from-emerald-500 to-emerald-700 text-white text-sm rounded-lg hover:opacity-90 transition-opacity flex items-center gap-2"
             >
               <Plus className="w-4 h-4" />
-              添加知识
+              添加测试文档
             </button>
           </header>
           <div className="flex-1 overflow-y-auto scrollbar-thin px-6 py-4 space-y-3">
@@ -902,7 +981,7 @@ export default function ChatPage() {
                   <div className="flex items-center justify-between mb-4">
                     <h3 className="text-white font-semibold flex items-center gap-2">
                       <BookOpen className="w-4 h-4 text-emerald-400" />
-                      添加知识
+                      添加测试文档
                     </h3>
                     <button onClick={() => { setShowAddKnowledge(false); setNewKnowledgeContent(''); }} className="p-1 text-slate-400 hover:text-white transition-colors">
                       <X className="w-4 h-4" />
@@ -911,7 +990,7 @@ export default function ChatPage() {
                   <textarea
                     value={newKnowledgeContent}
                     onChange={e => setNewKnowledgeContent(e.target.value)}
-                    placeholder="请输入知识内容..."
+                    placeholder="请输入测试文档内容..."
                     rows={8}
                     className="w-full bg-slate-900/50 border border-white/10 rounded-lg px-4 py-3 text-sm text-white placeholder-slate-500 outline-none focus:border-emerald-500/50 resize-none mb-4"
                     autoFocus
@@ -942,8 +1021,8 @@ export default function ChatPage() {
                 <div className="w-16 h-16 bg-gradient-to-br from-emerald-500/20 to-blue-500/20 rounded-2xl flex items-center justify-center mb-4">
                   <BookOpen className="w-7 h-7 text-emerald-400" />
                 </div>
-                <h3 className="text-base font-semibold text-white mb-2">知识库为空</h3>
-                <p className="text-xs text-slate-500 max-w-xs">点击右上角"添加知识"按钮，即可添加知识文档</p>
+                <h3 className="text-base font-semibold text-white mb-2">测试文档库为空</h3>
+                <p className="text-xs text-slate-500 max-w-xs">点击右上角"添加测试文档"按钮，即可添加测试文档</p>
               </div>
             ) : (
               <>
@@ -951,7 +1030,7 @@ export default function ChatPage() {
                   <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
                     <div className="bg-slate-800 border border-white/10 rounded-xl p-6 max-w-sm w-full mx-4">
                       <h3 className="text-white font-semibold mb-2">确认删除</h3>
-                      <p className="text-sm text-slate-400 mb-6">删除后无法恢复，确定要删除这条知识吗？</p>
+                      <p className="text-sm text-slate-400 mb-6">删除后无法恢复，确定要删除这条测试文档吗？</p>
                       <div className="flex gap-3 justify-end">
                         <button onClick={cancelDelete} className="px-4 py-2 bg-slate-700 text-white text-sm rounded-lg hover:bg-slate-600 transition-colors">取消</button>
                         <button onClick={confirmDelete} className="px-4 py-2 bg-red-500 text-white text-sm rounded-lg hover:bg-red-600 transition-colors">确认删除</button>
@@ -998,6 +1077,11 @@ export default function ChatPage() {
     );
   }
 
+  // ==================== Workspace View ====================
+  if (showWorkspace) {
+    return <TestWorkspace onBack={() => setShowWorkspace(false)} />;
+  }
+
   // ==================== Chat Page ====================
   return (
     <div className="h-screen flex bg-gradient-to-br from-slate-950 via-blue-950/30 to-slate-950">
@@ -1006,11 +1090,11 @@ export default function ChatPage() {
         <div className="p-5 border-b border-white/5">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 bg-gradient-to-br from-blue-500 to-blue-700 rounded-lg flex items-center justify-center">
-              <Shield className="w-5 h-5 text-white" />
+              <Bug className="w-5 h-5 text-white" />
             </div>
             <div>
-              <h1 className="text-sm font-bold text-white">保险AI助手</h1>
-              <p className="text-[10px] text-slate-500">统一对话模式</p>
+              <h1 className="text-sm font-bold text-white">TestAssistant AI</h1>
+              <p className="text-[10px] text-slate-500">高级测试助手</p>
             </div>
           </div>
         </div>
@@ -1110,6 +1194,13 @@ export default function ChatPage() {
 
         <div className="p-4 border-t border-white/5 space-y-2">
           <button
+            onClick={() => setShowWorkspace(true)}
+            className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm text-emerald-400 hover:bg-emerald-500/10 hover:text-emerald-300 transition-all border border-emerald-500/20"
+          >
+            <Bug className="w-4 h-4" />
+            <span>测试工作台</span>
+          </button>
+          <button
             onClick={() => setShowFilePanel(true)}
             className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm text-slate-400 hover:bg-white/5 hover:text-white transition-all"
           >
@@ -1122,7 +1213,7 @@ export default function ChatPage() {
             className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm text-slate-400 hover:bg-white/5 hover:text-white transition-all"
           >
             <BookOpen className="w-4 h-4" />
-            <span>知识库管理</span>
+            <span>测试文档管理</span>
             <span className="ml-auto text-[10px] px-1.5 py-0.5 rounded-full bg-white/5 text-slate-500">{docCount}</span>
           </button>
           <button onClick={() => setShowClearChatConfirm(true)} className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-red-500/10 border border-red-500/20 rounded-lg text-xs text-red-400 hover:bg-red-500/20 transition-all">
@@ -1233,7 +1324,7 @@ export default function ChatPage() {
                   {/* Bot response */}
                   <div className="flex gap-3 animate-slide-up">
                     <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center flex-shrink-0 mt-0.5">
-                      <Shield className="w-4 h-4 text-white" />
+                      <Bug className="w-4 h-4 text-white" />
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="space-y-2">
@@ -1261,7 +1352,7 @@ export default function ChatPage() {
                                   {msg.output.data.has_knowledge && msg.output.data.references && msg.output.data.references.length > 0 && (
                                     <div className="pt-3 border-t border-white/5">
                                       <div className="text-[10px] text-emerald-400 font-semibold mb-1 flex items-center gap-1">
-                                        <BookOpen className="w-3 h-3" /> 参考知识
+                                        <BookOpen className="w-3 h-3" /> 参考测试文档
                                       </div>
                                       {msg.output.data.references.map((ref: string, idx: number) => (
                                         <span key={idx} className="inline-block mr-2 mt-1 px-1.5 py-0.5 bg-emerald-500/10 border border-emerald-500/20 rounded text-[10px] text-emerald-400">
@@ -1272,7 +1363,7 @@ export default function ChatPage() {
                                   )}
                                   {!msg.output.data.has_knowledge && (
                                     <div className="pt-3 border-t border-white/5">
-                                      <span className="text-[10px] text-amber-400">提示：知识库为空，当前基于AI通用知识回答</span>
+                                      <span className="text-[10px] text-amber-400">提示：测试文档库为空，当前基于AI通用知识回答</span>
                                     </div>
                                   )}
                                 </>
@@ -1280,66 +1371,44 @@ export default function ChatPage() {
                                 <div className="text-sm text-slate-300">{msg.output.message || '暂无回答'}</div>
                               )}
                             </div>
-                          ) : msg.output.module === 'extract' ? (
+                          ) : msg.output.module === 'code' ? (
                             <div className="space-y-2">
                               <div className="flex items-center gap-2 text-xs font-semibold text-slate-300">
-                                <FileText className="w-3.5 h-3.5" /> 提取结果
-                                {msg.output.data?.total && (
-                                  <span className="text-[10px] text-slate-500">({msg.output.data.total} 条)</span>
-                                )}
+                                <Code className="w-3.5 h-3.5" /> 代码分析结果
                               </div>
-                              {msg.output.data?.records && msg.output.data.records.length > 0 ? (
-                                <div className="space-y-2">
-                                  {msg.output.data.records.map((record: any, idx: number) => (
-                                    <div key={idx} className="grid grid-cols-2 gap-3 p-2 bg-white/[0.02] rounded-lg">
-                                      <div>
-                                        <div className="text-[10px] text-slate-500">投保人姓名</div>
-                                        <div className="text-sm text-white font-medium">{record.policyholder_name || '未找到'}</div>
-                                      </div>
-                                      <div>
-                                        <div className="text-[10px] text-slate-500">保单号</div>
-                                        <div className="text-sm text-white font-medium font-mono">{record.policy_number || '未找到'}</div>
-                                      </div>
-                                    </div>
-                                  ))}
-                                </div>
-                              ) : (
-                                <div className="grid grid-cols-2 gap-3">
-                                  <div>
-                                    <div className="text-[10px] text-slate-500">投保人姓名</div>
-                                    <div className="text-sm text-white font-medium">{msg.output.data?.policyholder_name || '未找到'}</div>
-                                  </div>
-                                  <div>
-                                    <div className="text-[10px] text-slate-500">保单号</div>
-                                    <div className="text-sm text-white font-medium font-mono">{msg.output.data?.policy_number || '未找到'}</div>
-                                  </div>
-                                </div>
-                              )}
+                              <div className="text-sm text-slate-300 whitespace-pre-wrap">{msg.output.data?.analysis || msg.output.message || '暂无分析结果'}</div>
+                            </div>
+                          ) : msg.output.module === 'case' ? (
+                            <div className="space-y-2">
+                              <div className="flex items-center gap-2 text-xs font-semibold text-slate-300">
+                                <TestTube className="w-3.5 h-3.5" /> 测试用例
+                              </div>
+                              <div className="text-sm text-slate-300 whitespace-pre-wrap">{msg.output.data?.cases || msg.output.message || '暂无用例生成结果'}</div>
                             </div>
                           ) : msg.output.module === 'complaint' ? (
                             <div className="space-y-2">
                               <div className="flex items-center gap-2 text-xs font-semibold text-slate-300">
-                                <AlertTriangle className="w-3.5 h-3.5" /> 分类结果
+                                <AlertCircle className="w-3.5 h-3.5" /> Bug分析结果
                               </div>
                               <div className="space-y-1.5">
                                 <div className="flex items-center justify-between">
-                                  <span className="text-xs text-slate-400">业务分类</span>
+                                  <span className="text-xs text-slate-400">Bug类型</span>
                                   <div className="flex items-center gap-2">
-                                    <span className="text-sm text-white font-medium">{msg.output.data?.category}</span>
+                                    <span className="text-sm text-white font-medium">{msg.output.data?.bug_type}</span>
                                     <ConfidenceBadge value={msg.output.data?.category_confidence || 0} />
                                   </div>
                                 </div>
                                 <div className="flex items-center justify-between">
-                                  <span className="text-xs text-slate-400">投诉原因一</span>
+                                  <span className="text-xs text-slate-400">严重程度</span>
                                   <div className="flex items-center gap-2">
-                                    <span className="text-sm text-white font-medium">{msg.output.data?.reason_primary}</span>
+                                    <span className="text-sm text-white font-medium">{msg.output.data?.severity || '待评估'}</span>
                                     <ConfidenceBadge value={msg.output.data?.reason_primary_confidence || 0} />
                                   </div>
                                 </div>
                                 <div className="flex items-center justify-between">
-                                  <span className="text-xs text-slate-400">投诉原因二</span>
+                                  <span className="text-xs text-slate-400">影响范围</span>
                                   <div className="flex items-center gap-2">
-                                    <span className="text-sm text-white font-medium">{msg.output.data?.reason_secondary}</span>
+                                    <span className="text-sm text-white font-medium">{msg.output.data?.scope || '待评估'}</span>
                                     <ConfidenceBadge value={msg.output.data?.reason_secondary_confidence || 0} />
                                   </div>
                                 </div>
@@ -1347,7 +1416,7 @@ export default function ChatPage() {
                             </div>
                           ) : msg.output.module === 'knowledge' ? (
                             <div className="flex items-center gap-2">
-                              <span className="text-xs text-emerald-400 font-semibold">✅ 知识添加成功</span>
+                              <span className="text-xs text-emerald-400 font-semibold">✅ 测试文档添加成功</span>
                               <span className="text-[10px] text-slate-500 font-mono">{msg.output.data?.doc_id}</span>
                             </div>
                           ) : (
@@ -1373,7 +1442,7 @@ export default function ChatPage() {
                   <div className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
                   <div className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
                 </div>
-                <span className="text-[10px] text-slate-500">正在识别意图...</span>
+                <span className="text-[10px] text-slate-500">正在分析意图...</span>
               </div>
             </div>
           )}
@@ -1798,6 +1867,252 @@ export default function ChatPage() {
                 <FileUp className="w-3.5 h-3.5" />
                 确认上传
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Web Test Agent Panel (Right Side) */}
+      {showTestPanel && (
+        <div className="fixed inset-0 z-[9999] bg-black/30 backdrop-blur-sm flex justify-end">
+          <div className="w-[480px] bg-slate-900/95 backdrop-blur-xl border-l border-white/10 flex flex-col h-full animate-slide-left">
+            {/* Panel Header */}
+            <div className="px-5 py-4 border-b border-white/5 flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+                  <Bug className="w-4 h-4 text-emerald-400" />
+                  Web 测试 Agent
+                </h3>
+                <p className="text-[10px] text-slate-500 mt-0.5">AI自动测试网页 + 定位修复代码Bug</p>
+              </div>
+              <button onClick={() => setShowTestPanel(false)} className="p-1 text-slate-400 hover:text-white transition-colors">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Config Area */}
+            <div className="px-4 py-3 border-b border-white/5 space-y-3">
+              {/* Target URL */}
+              <div>
+                <label className="text-[10px] text-slate-500 mb-1 block flex items-center gap-1">
+                  <Globe className="w-3 h-3" /> 目标测试网址
+                </label>
+                <input
+                  type="text"
+                  value={testTargetUrl}
+                  onChange={e => setTestTargetUrl(e.target.value)}
+                  placeholder="https://example.com"
+                  className="w-full bg-slate-800/60 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 outline-none focus:border-emerald-500/50"
+                  disabled={isTestRunning}
+                />
+              </div>
+
+              {/* Project Path */}
+              <div>
+                <label className="text-[10px] text-slate-500 mb-1 block flex items-center gap-1">
+                  <FolderOpen className="w-3 h-3" /> 项目代码路径
+                </label>
+                <input
+                  type="text"
+                  value={testProjectPath}
+                  onChange={e => setTestProjectPath(e.target.value)}
+                  placeholder="C:\Users\yourname\project"
+                  className="w-full bg-slate-800/60 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 outline-none focus:border-emerald-500/50"
+                  disabled={isTestRunning}
+                />
+              </div>
+
+              {/* Test Goals */}
+              <div>
+                <label className="text-[10px] text-slate-500 mb-1 block flex items-center gap-1">
+                  <ClipboardList className="w-3 h-3" /> 测试目标 (每行一个)
+                </label>
+                <textarea
+                  value={testGoals}
+                  onChange={e => setTestGoals(e.target.value)}
+                  placeholder={"测试登录功能\n测试搜索框\n测试表单提交"}
+                  rows={3}
+                  className="w-full bg-slate-800/60 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 outline-none focus:border-emerald-500/50 resize-none"
+                  disabled={isTestRunning}
+                />
+              </div>
+
+              {/* Run Button */}
+              <button
+                onClick={handleTestRun}
+                disabled={isTestRunning || !testTargetUrl.trim() || !testProjectPath.trim() || !testGoals.trim()}
+                className="w-full flex items-center justify-center gap-2 px-3 py-2.5 bg-gradient-to-r from-emerald-500 to-emerald-700 text-white text-sm rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50"
+              >
+                {isTestRunning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Bug className="w-4 h-4" />}
+                {isTestRunning ? '测试执行中...' : '开始测试'}
+              </button>
+            </div>
+
+            {/* Results Area */}
+            <div className="flex-1 overflow-y-auto scrollbar-thin px-4 py-3 space-y-3">
+              {/* Empty State */}
+              {testStatus === '' && testSteps.length === 0 && (
+                <div className="flex flex-col items-center justify-center py-12 text-center">
+                  <div className="w-12 h-12 bg-emerald-500/10 rounded-xl flex items-center justify-center mb-3">
+                    <Bug className="w-5 h-5 text-emerald-400" />
+                  </div>
+                  <p className="text-xs text-slate-500">暂无测试任务</p>
+                  <p className="text-[10px] text-slate-600 mt-1">配置测试参数后开始自动化测试</p>
+                </div>
+              )}
+
+              {/* Running Status */}
+              {testStatus === 'running' && (
+                <div className="flex items-center gap-2 p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-lg">
+                  <Loader2 className="w-4 h-4 text-emerald-400 animate-spin" />
+                  <span className="text-xs text-emerald-400">Web测试Agent正在执行...</span>
+                </div>
+              )}
+
+              {/* Completed/Failed Status */}
+              {(testStatus === 'completed' || testStatus === 'failed') && (
+                <div className={`flex items-center gap-2 p-3 rounded-lg ${
+                  testStatus === 'completed'
+                    ? 'bg-emerald-500/10 border border-emerald-500/20'
+                    : 'bg-red-500/10 border border-red-500/20'
+                }`}>
+                  {testStatus === 'completed'
+                    ? <CheckCircle className="w-4 h-4 text-emerald-400" />
+                    : <AlertCircle className="w-4 h-4 text-red-400" />
+                  }
+                  <span className="text-xs text-white">{testMessage}</span>
+                </div>
+              )}
+
+              {/* Stats */}
+              {testSteps.length > 0 && (
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="bg-white/[0.03] border border-white/5 rounded-lg p-2 text-center">
+                    <div className="text-lg font-bold text-white">{testSteps.length}</div>
+                    <div className="text-[10px] text-slate-500">执行步骤</div>
+                  </div>
+                  <div className="bg-white/[0.03] border border-white/5 rounded-lg p-2 text-center">
+                    <div className={`text-lg font-bold ${testErrorsFound > 0 ? 'text-red-400' : 'text-emerald-400'}`}>{testErrorsFound}</div>
+                    <div className="text-[10px] text-slate-500">发现错误</div>
+                  </div>
+                  <div className="bg-white/[0.03] border border-white/5 rounded-lg p-2 text-center">
+                    <div className="text-lg font-bold text-blue-400">{testScreenshotsSaved}</div>
+                    <div className="text-[10px] text-slate-500">截图保存</div>
+                  </div>
+                </div>
+              )}
+
+              {/* Steps List */}
+              {testSteps.map((step, idx) => (
+                <div key={idx} className="bg-white/[0.03] border border-white/5 rounded-lg overflow-hidden">
+                  {/* Step Header */}
+                  <div className="flex items-center gap-2 px-3 py-2 border-b border-white/5">
+                    <span className="text-[10px] text-slate-500 font-mono">#{step.step}</span>
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+                      step.action === 'click' ? 'bg-blue-500/20 text-blue-400' :
+                      step.action === 'fill' ? 'bg-emerald-500/20 text-emerald-400' :
+                      step.action === 'navigate' ? 'bg-purple-500/20 text-purple-400' :
+                      step.action === 'wait' ? 'bg-amber-500/20 text-amber-400' :
+                      step.action === 'done' ? 'bg-cyan-500/20 text-cyan-400' :
+                      'bg-slate-500/20 text-slate-400'
+                    }`}>
+                      {step.action}
+                    </span>
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+                      step.success ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'
+                    }`}>
+                      {step.success ? '✅' : '❌'}
+                    </span>
+                    <span className="text-xs text-slate-300 flex-1 truncate">{step.target}</span>
+                  </div>
+
+                  {/* Screenshot */}
+                  {step.screenshot && (
+                    <div className="px-3 py-2">
+                      <img
+                        src={step.screenshot}
+                        alt={`步骤 ${step.step} 截图`}
+                        className="w-full rounded border border-white/5"
+                        style={{ maxHeight: '150px', objectFit: 'contain' }}
+                      />
+                    </div>
+                  )}
+
+                  {/* Console/Network Errors */}
+                  {(step.console_errors?.length > 0 || step.network_errors?.length > 0) && (
+                    <div className="px-3 py-2 border-t border-white/5 space-y-1 max-h-40 overflow-y-auto scrollbar-thin">
+                      {step.console_errors?.slice(0, 10).map((err: string, i: number) => (
+                        <div key={i} className="text-[10px] text-red-400 font-mono whitespace-pre-wrap break-all">Console: {err}</div>
+                      ))}
+                      {step.network_errors?.slice(0, 10).map((err: string, i: number) => (
+                        <div key={i} className="text-[10px] text-orange-400 font-mono whitespace-pre-wrap break-all">Network: {err}</div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Result */}
+                  {step.result && (
+                    <div className="px-3 py-2 border-t border-white/5">
+                      <span className="text-[10px] text-slate-400">{step.result}</span>
+                    </div>
+                  )}
+                </div>
+              ))}
+
+              {/* Code Issues */}
+              {testCodeIssues.length > 0 && (
+                <div className="pt-2">
+                  <div className="flex items-center gap-2 mb-2">
+                    <Bug className="w-3.5 h-3.5 text-red-400" />
+                    <span className="text-xs text-white font-semibold">代码问题定位 ({testCodeIssues.length})</span>
+                  </div>
+                  {testCodeIssues.map((issue, idx) => (
+                    <div key={idx} className="bg-red-500/5 border border-red-500/20 rounded-lg p-3 mb-2">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex-1 min-w-0">
+                          <div className="text-xs text-red-400 font-mono truncate">
+                            {issue.file_path}:{issue.line_number}
+                          </div>
+                          <div className="text-xs text-white mt-1">{issue.issue_description}</div>
+                          <div className="text-[10px] text-slate-500 mt-1 font-mono whitespace-pre-wrap max-h-20 overflow-y-auto">
+                            {issue.suggested_fix}
+                          </div>
+                        </div>
+                      </div>
+                      {/* Fix Actions */}
+                      {!issue.fix_result && (
+                        <div className="flex gap-2 mt-3 pt-2 border-t border-white/5">
+                          <button
+                            onClick={() => handleCodeFix(idx, true)}
+                            className="flex-1 px-2 py-1.5 bg-emerald-500/20 text-emerald-400 text-[10px] rounded hover:bg-emerald-500/30 transition-colors flex items-center justify-center gap-1"
+                          >
+                            <CheckCircle className="w-3 h-3" /> 同意修改
+                          </button>
+                          <button
+                            onClick={() => handleCodeFix(idx, false)}
+                            className="flex-1 px-2 py-1.5 bg-amber-500/20 text-amber-400 text-[10px] rounded hover:bg-amber-500/30 transition-colors flex items-center justify-center gap-1"
+                          >
+                            <ClipboardList className="w-3 h-3" /> 仅看建议
+                          </button>
+                        </div>
+                      )}
+                      {/* Fix Result */}
+                      {issue.fix_result && (
+                        <div className={`mt-3 pt-2 border-t border-white/5 ${
+                          issue.fix_result.success ? 'text-emerald-400' : 'text-red-400'
+                        }`}>
+                          <div className="text-[10px] font-medium">{issue.fix_result.message}</div>
+                          {issue.fix_result.fixed_code && (
+                            <pre className="text-[10px] text-slate-300 bg-slate-900/50 rounded p-2 mt-1 overflow-x-auto max-h-40">
+                              {issue.fix_result.fixed_code}
+                            </pre>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </div>
