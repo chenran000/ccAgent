@@ -71,20 +71,6 @@ def save_file(file_bytes: bytes, filename: str, user_id: int) -> dict:
     }
 
 
-def get_user_files(user_id: int) -> List[dict]:
-    """
-    获取用户上传的所有文件列表（从数据库返回）
-
-    Args:
-        user_id: 用户 ID
-
-    Returns:
-        文件信息列表
-    """
-    # 这个函数主要用于从数据库查询，实际查询逻辑在 routes 中
-    return []
-
-
 def delete_file(file_path: str) -> bool:
     """
     删除文件

@@ -132,6 +132,7 @@ class ChatRequest(BaseModel):
     use_rag: bool = False
     session_id: Optional[str] = None
     file_id: Optional[int] = None
+    browser_url: Optional[str] = None  # 浏览器面板当前打开的URL
 
 class IntentResult(BaseModel):
     intent: str           # code / case / knowledge / chat
@@ -216,6 +217,11 @@ class TestTaskRequest(BaseModel):
     test_goals: List[str]  # 测试目标列表，如["测试登录功能", "测试搜索框"]
     max_steps: int = 30  # 最大测试步骤数
 
+class TestRequest(BaseModel):
+    """流式测试请求"""
+    content: str  # 用户输入的测试描述，包含URL
+    browser_url: Optional[str] = None  # 浏览器面板当前打开的URL
+
 class TestStep(BaseModel):
     """测试步骤"""
     step: int
@@ -252,3 +258,40 @@ class CodeModifyRequest(BaseModel):
     task_id: str
     issue_index: int
     confirmed: bool  # True=同意修改, False=仅给建议
+
+# ========== 项目文件夹相关模型 ==========
+
+class ProjectFolderInfo(BaseModel):
+    """项目文件夹信息"""
+    id: int
+    folder_name: str
+    folder_path: str
+    created_at: str
+    updated_at: str
+
+class ProjectFolderListResponse(BaseModel):
+    folders: List[ProjectFolderInfo]
+    total: int
+
+class ProjectFolderCreateRequest(BaseModel):
+    folder_name: str
+
+class FileNode(BaseModel):
+    """文件树节点"""
+    name: str
+    path: str
+    type: str  # 'file' or 'directory'
+    children: Optional[List['FileNode']] = None
+    size: int = 0
+
+class FileContentResponse(BaseModel):
+    """文件内容响应"""
+    name: str
+    path: str
+    content: str  # 文本内容（代码、文本等）
+    content_type: str  # 'code' | 'text' | 'image' | 'json' | 'markdown' | 'binary'
+    language: str = ""  # 代码语言（用于高亮）
+    is_binary: bool = False
+    image_url: str = ""  # 图片的 base64 data URL
+
+FileNode.model_rebuild()

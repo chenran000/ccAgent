@@ -1,1 +1,1 @@
-{"root":["./src/app.tsx","./src/main.tsx","./src/context/authcontext.tsx","./src/pages/chatpage.tsx","./src/pages/loginpage.tsx"],"errors":true,"version":"5.6.3"}
+{"root":["./src/app.tsx","./src/config.ts","./src/main.tsx","./src/components/browserpanel.tsx","./src/components/chatpanel.tsx","./src/components/confirmdialog.tsx","./src/components/filetreepanel.tsx","./src/components/idelayout.tsx","./src/components/resizablepanel.tsx","./src/components/tasksidebar.tsx","./src/context/authcontext.tsx","./src/pages/loginpage.tsx"],"errors":true,"version":"5.6.3"}

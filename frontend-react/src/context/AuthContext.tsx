@@ -23,7 +23,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [isLoading, setIsLoading] = useState(true);
 
   const apiFetch = useCallback(async (url: string, options: RequestInit = {}) => {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json', ...options.headers as Record<string, string> };
+    const headers: Record<string, string> = { ...options.headers as Record<string, string> };
+    // Only set Content-Type to JSON if body is not FormData (FormData needs browser to set multipart boundary)
+    if (!(options.body instanceof FormData)) {
+      headers['Content-Type'] = 'application/json';
+    }
     if (token) headers['Authorization'] = `Bearer ${token}`;
     const res = await fetch(`${API_BASE}${url}`, { ...options, headers });
     if (res.status === 401) {
@@ -87,7 +91,11 @@ export function useAuth() {
 
 export async function apiFetch(url: string, options: RequestInit = {}) {
   const token = localStorage.getItem('auth_token');
-  const headers: Record<string, string> = { 'Content-Type': 'application/json', ...options.headers as Record<string, string> };
+  const headers: Record<string, string> = { ...options.headers as Record<string, string> };
+  // Only set Content-Type to JSON if body is not FormData (FormData needs browser to set multipart boundary)
+  if (!(options.body instanceof FormData)) {
+    headers['Content-Type'] = 'application/json';
+  }
   if (token) headers['Authorization'] = `Bearer ${token}`;
   const res = await fetch(`${API_BASE}${url}`, { ...options, headers });
   if (res.status === 401) {

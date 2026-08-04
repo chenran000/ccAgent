@@ -55,25 +55,16 @@ def classify_intent_local(content: str) -> dict:
     """
     content_lower = content.lower()
 
-    # 投诉类关键词（扩大匹配范围，覆盖更多实际表达）
-    complaint_keywords = [
-        # 明确投诉意图
-        "投诉", "举报", "不满", "抱怨", "生气", "差评", "维权",
-        # 服务态度相关
-        "态度差", "态度不好", "态度恶劣", "态度", "不耐烦", "爱理不理", "冷",
-        # 等待/时效相关
-        "排队", "等太", "等了", "等很久", "等半天", "一直等", "慢", "太久",
-        # 沟通/服务问题
-        "打不通", "没人接", "不解决", "没解决", "不管", "不理", "踢皮球",
-        # 其他负面表达
-        "骗", "忽悠", "隐瞒", "夸大", "拒绝", "不合理", "不公平", "太差",
-        "差劲", "垃圾", "无语", "失望", "烦", "气死", "恶心",
+    # 代码分析类关键词
+    code_keywords = [
+        "代码", "bug", "错误", "异常", "分析代码", "审查代码",
+        "查找bug", "定位问题", "修复", "代码问题", "代码分析",
     ]
 
-    # 保单提取类关键词
-    extract_keywords = [
-        "保单", "保单号", "投保人", "保单号码", "提取", "查一下保单",
-        "看看保单", "保单信息", "帮我查保单", "保单多少"
+    # 测试用例类关键词
+    case_keywords = [
+        "测试用例", "用例", "测试场景", "测试方案", "边界",
+        "测试计划", "回归测试", "生成用例",
     ]
 
     # 知识库类关键词
@@ -82,17 +73,34 @@ def classify_intent_local(content: str) -> dict:
         "录入知识", "知识管理", "添加到知识库"
     ]
 
+    # Web 自动化测试类关键词
+    web_test_keywords = [
+        "测试这个", "测试该", "打开网站", "打开这个", "自动化测试",
+        "浏览器测试", "测试页面", "测试系统", "访问", "测试登录",
+        "测试注册", "测试功能", "帮我测试", "实际测试",
+    ]
+
+    # URL pattern detection
+    has_url = bool(re.search(r'https?://', content))
+
     # 计算各类型匹配得分
-    complaint_score = sum(1 for kw in complaint_keywords if kw in content_lower)
-    extract_score = sum(1 for kw in extract_keywords if kw in content_lower)
+    code_score = sum(1 for kw in code_keywords if kw in content_lower)
+    case_score = sum(1 for kw in case_keywords if kw in content_lower)
     knowledge_score = sum(1 for kw in knowledge_keywords if kw in content_lower)
+    web_test_score = sum(1 for kw in web_test_keywords if kw in content_lower)
 
-    max_score = max(complaint_score, extract_score, knowledge_score, 1)
+    # URL 出现时大幅增加 web_test 权重
+    if has_url:
+        web_test_score += 3
 
-    if complaint_score == max_score and complaint_score > 0:
-        return {"intent": "complaint", "confidence": min(complaint_score / 3, 1.0)}
-    elif extract_score == max_score and extract_score > 0:
-        return {"intent": "extract", "confidence": min(extract_score / 3, 1.0)}
+    max_score = max(code_score, case_score, knowledge_score, web_test_score, 1)
+
+    if web_test_score == max_score and web_test_score > 0:
+        return {"intent": "web_test", "confidence": min(web_test_score / 3, 1.0)}
+    elif code_score == max_score and code_score > 0:
+        return {"intent": "code", "confidence": min(code_score / 3, 1.0)}
+    elif case_score == max_score and case_score > 0:
+        return {"intent": "case", "confidence": min(case_score / 3, 1.0)}
     elif knowledge_score == max_score and knowledge_score > 0:
         return {"intent": "knowledge", "confidence": min(knowledge_score / 3, 1.0)}
     else:

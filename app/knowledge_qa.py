@@ -15,7 +15,7 @@ def direct_chat(question: str, ai_config: dict) -> str:
     if not ai_config or not ai_config.get("api_key"):
         raise ValueError("请在模型管理中配置 AI 模型")
 
-    system_prompt = "你是一个专业的保险业务助手。请回答用户的问题，使用你的通用知识。"
+    system_prompt = "你是一个专业的软件测试助手。请回答用户的问题，使用你的通用知识。"
 
     client = openai.OpenAI(api_key=ai_config["api_key"], base_url=ai_config["api_base_url"])
     response = client.chat.completions.create(
@@ -59,8 +59,8 @@ def answer_with_knowledge(
         )
     else:
         system_prompt = (
-            f"你是一个专业的保险业务助手。请回答用户的问题。"
-            f"注意：当前知识库为空，请基于你的保险专业知识回答。\n\n"
+            f"你是一个专业的软件测试助手。请回答用户的问题。"
+            f"注意：当前知识库为空，请基于你的测试专业知识回答。\n\n"
             f"【用户问题】\n{question}"
         )
 

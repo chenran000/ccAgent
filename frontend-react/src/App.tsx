@@ -1,17 +1,17 @@
 import { useAuth } from './context/AuthContext';
 import LoginPage from './pages/LoginPage';
-import ChatPage from './pages/ChatPage';
+import IDELayout from './components/IDELayout';
 
 export default function App() {
   const { user, isLoading } = useAuth();
 
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
-        <div className="text-slate-400 text-sm">加载中...</div>
-      </div>
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+      <div className="text-gray-500 text-sm">加载中...</div>
+    </div>
     );
   }
 
-  return user ? <ChatPage /> : <LoginPage />;
+  return user ? <IDELayout /> : <LoginPage />;
 }

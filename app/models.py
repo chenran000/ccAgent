@@ -1,7 +1,7 @@
 """数据库模型"""
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
-from datetime import datetime, timezone
+from datetime import datetime
 
 from app.database import Base
 
@@ -13,7 +13,7 @@ class User(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     username = Column(String(50), unique=True, nullable=False, index=True)
     password_hash = Column(String(255), nullable=False)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=lambda: datetime.now())
 
     sessions = relationship("Session", back_populates="user", cascade="all, delete-orphan")
 
@@ -26,8 +26,8 @@ class Session(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     session_id = Column(String(100), unique=True, nullable=False, index=True)
     name = Column(String(200), default="新会话")
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=lambda: datetime.now())
+    updated_at = Column(DateTime, default=lambda: datetime.now())
 
     user = relationship("User", back_populates="sessions")
     conversations = relationship("Conversation", back_populates="session", cascade="all, delete-orphan")
@@ -44,8 +44,8 @@ class ModelConfig(Base):
     api_base_url = Column(String(255), nullable=False)
     model_name = Column(String(100), nullable=False)
     is_active = Column(Integer, default=1)  # 是否启用
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=lambda: datetime.now())
+    updated_at = Column(DateTime, default=lambda: datetime.now())
 
     user = relationship("User", backref="model_configs")
 
@@ -57,7 +57,7 @@ class UserActiveModel(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False, index=True)
     model_config_id = Column(Integer, ForeignKey("model_configs.id"), nullable=True)
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now())
 
     user = relationship("User", backref="active_model")
 
@@ -69,10 +69,10 @@ class Conversation(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     session_id = Column(String(100), ForeignKey("sessions.session_id"), nullable=True, index=True)
-    module = Column(String(50), nullable=False)  # extract / complaint / knowledge / chat
+    module = Column(String(50), nullable=False)  # code / case / knowledge / chat
     input_text = Column(Text, nullable=False)
     output_data = Column(Text, nullable=False)  # JSON 字符串
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(), index=True)
 
     session = relationship("Session", back_populates="conversations")
 
@@ -89,7 +89,21 @@ class Document(Base):
     file_type = Column(String(50), nullable=False)  # pdf / txt / ...
     file_size = Column(Integer, nullable=False)  # 文件大小（字节）
     extracted_text = Column(Text, nullable=True)  # 提取的文本内容（用于对话引用）
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=lambda: datetime.now())
+    updated_at = Column(DateTime, default=lambda: datetime.now())
 
     user = relationship("User", backref="documents")
+
+
+class ProjectFolder(Base):
+    """用户上传的项目文件夹表"""
+    __tablename__ = "project_folders"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    folder_name = Column(String(255), nullable=False)  # 项目名称
+    folder_path = Column(String(500), nullable=False)  # 存储路径
+    created_at = Column(DateTime, default=lambda: datetime.now())
+    updated_at = Column(DateTime, default=lambda: datetime.now())
+
+    user = relationship("User", backref="project_folders")

@@ -254,6 +254,8 @@ async def run_test_task(
     test_goals: List[str],
     ai_config: dict,
     max_steps: int = 30,
+    on_step: Any = None,  # async callback(step_data) called after each step
+    stop_event: Any = None,  # asyncio.Event to signal task cancellation
 ) -> dict:
     """
     执行Web测试任务
@@ -288,6 +290,7 @@ async def run_test_task(
         "code_issues": all_code_issues,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "project_path": project_path,
+        "stop_event": stop_event or asyncio.Event(),
     }
 
     browser = BrowserCapture(headless=False)  # 非headless以便观察
@@ -297,10 +300,18 @@ async def run_test_task(
 
         # 对每个测试目标执行测试
         for goal_idx, test_goal in enumerate(test_goals):
+            # 检查是否已停止
+            if running_test_tasks[task_id]["stop_event"].is_set():
+                break
+
             goal_steps = 0
             step_num = len(all_steps) + 1
 
             while goal_steps < max_steps and step_num <= max_steps:
+                # 检查是否已停止
+                if running_test_tasks[task_id]["stop_event"].is_set():
+                    break
+
                 # 1. 截图
                 screenshot = await browser.screenshot()
                 if screenshot:
@@ -373,12 +384,28 @@ async def run_test_task(
                     "target": target or reason,
                     "result": result,
                     "success": success,
-                    "screenshot": screenshot,
                     "console_errors": step_errors["console"],
                     "network_errors": step_errors["network"],
                 }
 
                 all_steps.append(step_record)
+
+                # 实时回调 - 推送当前步骤给前端
+                if on_step:
+                    try:
+                        await on_step({
+                            "type": "step",
+                            "step": step_num,
+                            "action": action,
+                            "target": target or reason,
+                            "result": result,
+                            "success": success,
+                            "console_errors": step_errors["console"],
+                            "network_errors": step_errors["network"],
+                        })
+                    except Exception:
+                        pass
+
                 step_num += 1
                 goal_steps += 1
 
@@ -420,8 +447,13 @@ async def run_test_task(
             if goal_idx < len(test_goals) - 1:
                 await browser.navigate(target_url)  # 重新加载页面
 
-        running_test_tasks[task_id]["status"] = "completed"
-        running_test_tasks[task_id]["message"] = f"测试完成，共 {total_errors} 个错误"
+        # 检查是否被用户停止
+        if running_test_tasks[task_id]["stop_event"].is_set():
+            running_test_tasks[task_id]["status"] = "cancelled"
+            running_test_tasks[task_id]["message"] = "测试已停止"
+        else:
+            running_test_tasks[task_id]["status"] = "completed"
+            running_test_tasks[task_id]["message"] = f"测试完成，共 {total_errors} 个错误"
 
     except Exception as e:
         running_test_tasks[task_id]["status"] = "failed"

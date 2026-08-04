@@ -1,40 +1,39 @@
 """API 路由定义模块 - TestAssistant AI"""
 import json
 import os
+import re
+import shutil
 import tempfile
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import List
 from fastapi import HTTPException, Depends, File, UploadFile, Form
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.database import get_db, init_db
-from app.models import User, Session as SessionModel, Conversation, ModelConfig, UserActiveModel, Document
+from app.models import User, Session as SessionModel, Conversation, ModelConfig, UserActiveModel, Document, ProjectFolder
 from app.auth import hash_password, verify_password, create_access_token, get_current_user
 from app.schemas import (
     LoginRequest, RegisterRequest, AuthResponse, UserInfo,
     ConversationRecord, ConversationHistoryResponse,
     SessionInfo, SessionListResponse, CreateSessionRequest, UpdateSessionRequest,
-    ChatRequest, ChatResponse,
-    FileUploadResponse, FileReadResponse,
-    SearchRequest, SearchResponse, KnowledgeStatsResponse,
-    AddKnowledgeRequest,
-    SupportedPlatform, ModelConfigInfo, ModelGroup,
+    ChatRequest,
+    SupportedPlatform, ModelConfigInfo,
     ModelListResponse, AddModelRequest, UpdateModelRequest, TestAIRequest,
     TestAIResponse, ActiveModelResponse,
-    FileInfo,
-    TestTaskRequest, TestTaskResponse, TestStep,
+    TestTaskRequest, TestTaskResponse, TestStep, TestRequest,
     CodeIssue, CodeModifyRequest,
-    CodeAnalysisRequest, CodeAnalysisResponse,
-    TestCaseRequest, TestCaseResponse,
+    ProjectFolderInfo, ProjectFolderListResponse, ProjectFolderCreateRequest,
+    FileNode, FileContentResponse,
+    AddKnowledgeRequest,
 )
 from app.intent_classifier import classify_intent_local
-from app.knowledge_qa import answer_with_knowledge, direct_chat
 from app.vector_db import vector_db
 from app.file_parser import parse_file
 from app.file_storage import save_file, delete_file as delete_file_from_disk, get_user_upload_dir
+from app.file_viewer import read_file_content
 
 
 def register_routes(app):
@@ -162,7 +161,7 @@ def register_routes(app):
             raise HTTPException(status_code=404, detail="会话不存在")
 
         session.name = request.name
-        session.updated_at = datetime.now(timezone.utc)
+        session.updated_at = datetime.now()
         db.commit()
         db.refresh(session)
 
@@ -319,7 +318,7 @@ def register_routes(app):
             mc.model_name = request.model_name
         if request.is_active is not None:
             mc.is_active = request.is_active
-        mc.updated_at = datetime.now(timezone.utc)
+        mc.updated_at = datetime.now()
 
         db.commit()
         return {"message": "模型配置已更新"}
@@ -379,7 +378,7 @@ def register_routes(app):
         active = db.query(UserActiveModel).filter_by(user_id=current_user.id).first()
         if active:
             active.model_config_id = config_id
-            active.updated_at = datetime.now(timezone.utc)
+            active.updated_at = datetime.now()
         else:
             active = UserActiveModel(user_id=current_user.id, model_config_id=config_id)
             db.add(active)
@@ -396,7 +395,7 @@ def register_routes(app):
         active = db.query(UserActiveModel).filter_by(user_id=current_user.id).first()
         if active:
             active.model_config_id = None
-            active.updated_at = datetime.now(timezone.utc)
+            active.updated_at = datetime.now()
             db.commit()
 
         return {"message": "已取消选择模型"}
@@ -476,7 +475,7 @@ def register_routes(app):
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db),
     ):
-        """上传文件到服务器，解析文本内容后保存"""
+        """上传文件到服务器，解析文本内容后保存，并同步到知识库向量数据库"""
         try:
             if not file.filename:
                 raise HTTPException(status_code=400, detail="文件名不能为空")
@@ -499,6 +498,17 @@ def register_routes(app):
             db.add(doc)
             db.commit()
             db.refresh(doc)
+
+            # 同步到知识库向量数据库
+            if file_info["extracted_text"].strip():
+                try:
+                    vector_db.add_document(
+                        content=file_info["extracted_text"],
+                        user_id=current_user.id,
+                        metadata={"source": file_info["original_filename"], "doc_id": str(doc.id)}
+                    )
+                except Exception as e:
+                    print(f"[知识库同步警告] {e}")
 
             return {
                 "id": doc.id,
@@ -594,223 +604,357 @@ def register_routes(app):
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"文件删除失败: {str(e)}")
 
-    # ==================== 代码分析接口 ====================
+    # ==================== 项目文件夹接口 ====================
 
-    @app.post("/code/analyze", response_model=CodeAnalysisResponse, summary="代码分析")
-    async def analyze_code(
-        request: CodeAnalysisRequest,
+    PROJECT_FOLDERS_DIR = Path(__file__).parent.parent / "project_uploads"
+    PROJECT_FOLDERS_DIR.mkdir(exist_ok=True)
+
+    @app.get("/projects", response_model=ProjectFolderListResponse, summary="获取项目文件夹列表")
+    async def list_project_folders(
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db),
     ):
-        """对提交的代码进行智能分析，发现潜在问题"""
+        """获取当前用户上传的所有项目文件夹"""
         try:
-            ai_config = _get_user_ai_config(current_user.id, db)
-            from openai import OpenAI
+            folders = db.query(ProjectFolder).filter(
+                ProjectFolder.user_id == current_user.id
+            ).order_by(ProjectFolder.updated_at.desc()).all()
 
-            client = OpenAI(api_key=ai_config["api_key"], base_url=ai_config.get("api_base_url", "https://api.openai.com/v1"))
-            from app.prompts import CODE_ANALYSIS_PROMPT
-
-            response = client.chat.completions.create(
-                model=ai_config["chat_model"],
-                messages=[
-                    {"role": "system", "content": CODE_ANALYSIS_PROMPT},
-                    {"role": "user", "content": request.code}
+            return ProjectFolderListResponse(
+                folders=[
+                    ProjectFolderInfo(
+                        id=f.id,
+                        folder_name=f.folder_name,
+                        folder_path=f.folder_path,
+                        created_at=f.created_at.isoformat(),
+                        updated_at=f.updated_at.isoformat(),
+                    )
+                    for f in folders
                 ],
-                temperature=0.3,
-                max_tokens=2000,
-            )
-
-            result_text = response.choices[0].message.content
-            result = {"analysis": result_text}
-
-            # 保存对话记录
-            conversation = Conversation(
-                user_id=current_user.id,
-                session_id=request.session_id,
-                module="code",
-                input_text=request.code[:500],
-                output_data=json.dumps(result, ensure_ascii=False),
-            )
-            db.add(conversation)
-            _update_session_name(db, request.session_id, f"代码分析: {request.code[:20]}")
-            db.commit()
-
-            return CodeAnalysisResponse(
-                intent="code",
-                confidence=0.9,
-                module="code",
-                data=result,
-                message="代码分析完成",
-                session_id=request.session_id,
+                total=len(folders),
             )
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"代码分析失败: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"获取项目列表失败: {str(e)}")
 
-    # ==================== 测试用例生成接口 ====================
-
-    @app.post("/case/generate", response_model=TestCaseResponse, summary="测试用例生成")
-    async def generate_test_case(
-        request: TestCaseRequest,
+    @app.post("/projects", response_model=ProjectFolderInfo, summary="上传项目文件夹")
+    async def create_project_folder(
+        request: ProjectFolderCreateRequest,
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db),
     ):
-        """根据功能描述生成完整的测试用例"""
+        """创建空项目文件夹"""
         try:
-            ai_config = _get_user_ai_config(current_user.id, db)
-            from openai import OpenAI
+            user_project_dir = PROJECT_FOLDERS_DIR / str(current_user.id)
+            user_project_dir.mkdir(exist_ok=True)
 
-            client = OpenAI(api_key=ai_config["api_key"], base_url=ai_config.get("api_base_url", "https://api.openai.com/v1"))
-            from app.prompts import TEST_CASE_PROMPT
+            folder_name = request.folder_name.strip() or "未命名项目"
+            folder_path = user_project_dir / f"{folder_name}_{uuid.uuid4().hex[:8]}"
+            folder_path.mkdir(exist_ok=True)
 
-            response = client.chat.completions.create(
-                model=ai_config["chat_model"],
-                messages=[
-                    {"role": "system", "content": TEST_CASE_PROMPT},
-                    {"role": "user", "content": request.feature_description}
-                ],
-                temperature=0.5,
-                max_tokens=4000,
-            )
-
-            result_text = response.choices[0].message.content
-            result = {"cases": result_text, "total": 1}
-
-            # 保存对话记录
-            conversation = Conversation(
+            pf = ProjectFolder(
                 user_id=current_user.id,
-                session_id=request.session_id,
-                module="case",
-                input_text=request.feature_description,
-                output_data=json.dumps(result, ensure_ascii=False),
+                folder_name=folder_name,
+                folder_path=str(folder_path),
             )
-            db.add(conversation)
-            _update_session_name(db, request.session_id, f"用例生成: {request.feature_description[:20]}")
+            db.add(pf)
             db.commit()
+            db.refresh(pf)
 
-            return TestCaseResponse(
-                intent="case",
-                confidence=0.9,
-                module="case",
-                data=result,
-                message="测试用例生成完成",
-                session_id=request.session_id,
+            return ProjectFolderInfo(
+                id=pf.id,
+                folder_name=pf.folder_name,
+                folder_path=pf.folder_path,
+                created_at=pf.created_at.isoformat(),
+                updated_at=pf.updated_at.isoformat(),
             )
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"测试用例生成失败: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"创建项目文件夹失败: {str(e)}")
 
-    # ==================== 测试文档库接口 ====================
+    @app.post("/projects/upload", summary="上传项目文件夹（ZIP）")
+    async def upload_project_zip(
+        folder_name: str = Form(...),
+        file: UploadFile = File(...),
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        """上传 ZIP 格式的项目文件夹"""
+        import zipfile
+        import shutil
 
-    @app.post("/knowledge/add", summary="添加测试文档")
+        try:
+            if not file.filename or not file.filename.lower().endswith('.zip'):
+                raise HTTPException(status_code=400, detail="仅支持 ZIP 格式的项目文件")
+
+            user_project_dir = PROJECT_FOLDERS_DIR / str(current_user.id)
+            user_project_dir.mkdir(exist_ok=True)
+
+            folder_name = folder_name.strip() or "导入项目"
+            folder_path = user_project_dir / f"{folder_name}_{uuid.uuid4().hex[:8]}"
+            folder_path.mkdir(exist_ok=True)
+
+            # 保存临时 ZIP 文件
+            temp_zip = folder_path.parent / f"temp_{uuid.uuid4().hex}.zip"
+            zip_content = await file.read()
+            with open(temp_zip, "wb") as f:
+                f.write(zip_content)
+
+            # 解压
+            with zipfile.ZipFile(temp_zip, 'r') as zf:
+                zf.extractall(folder_path)
+
+            # 删除临时文件
+            temp_zip.unlink()
+
+            pf = ProjectFolder(
+                user_id=current_user.id,
+                folder_name=folder_name,
+                folder_path=str(folder_path),
+            )
+            db.add(pf)
+            db.commit()
+            db.refresh(pf)
+
+            return {"message": "项目上传成功", "id": pf.id}
+        except HTTPException:
+            raise
+        except zipfile.BadZipFile:
+            raise HTTPException(status_code=400, detail="无效的 ZIP 文件")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"项目上传失败: {str(e)}")
+
+    @app.delete("/projects/{project_id}", summary="删除项目文件夹")
+    async def delete_project_folder(
+        project_id: int,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        """删除项目文件夹（包括磁盘文件）"""
+        try:
+            pf = db.query(ProjectFolder).filter(
+                ProjectFolder.id == project_id,
+                ProjectFolder.user_id == current_user.id
+            ).first()
+
+            if not pf:
+                raise HTTPException(status_code=404, detail="项目不存在")
+
+            # 删除磁盘文件夹
+            if os.path.isdir(pf.folder_path):
+                shutil.rmtree(pf.folder_path, ignore_errors=True)
+
+            db.delete(pf)
+            db.commit()
+
+            return {"message": "项目删除成功"}
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"项目删除失败: {str(e)}")
+
+    @app.get("/projects/{project_id}/files", summary="获取项目文件树")
+    async def get_project_file_tree(
+        project_id: int,
+        db: Session = Depends(get_db),
+        current_user: User = Depends(get_current_user),
+    ):
+        """获取项目文件树结构"""
+        import os
+        from app.schemas import FileNode
+
+        pf = db.query(ProjectFolder).filter(
+            ProjectFolder.id == project_id,
+            ProjectFolder.user_id == current_user.id
+        ).first()
+
+        if not pf:
+            raise HTTPException(status_code=404, detail="项目不存在")
+
+        if not os.path.isdir(pf.folder_path):
+            raise HTTPException(status_code=400, detail="项目文件夹不存在")
+
+        # 忽略的目录
+        ignore_dirs = {'.git', '__pycache__', 'node_modules', '.idea', '.vscode', '.next', 'dist', 'build', 'coverage', '.nyc_output', '.cache', 'venv', 'env', '.tox', '.pytest_cache', 'target', 'output', 'out'}
+        # 忽略的文件
+        ignore_files = {'.DS_Store', 'Thumbs.db'}
+
+        def build_tree(dir_path: str) -> List[dict]:
+            nodes = []
+            try:
+                entries = sorted(os.listdir(dir_path))
+            except PermissionError:
+                return nodes
+
+            for entry in entries:
+                if entry in ignore_dirs or entry in ignore_files:
+                    continue
+                if entry.startswith('.'):
+                    continue
+
+                full_path = os.path.join(dir_path, entry)
+                rel_path = os.path.relpath(full_path, pf.folder_path)
+
+                if os.path.isdir(full_path):
+                    children = build_tree(full_path)
+                    if children:  # 只添加非空目录
+                        nodes.append({
+                            "name": entry,
+                            "path": rel_path,
+                            "type": "directory",
+                            "children": children,
+                        })
+                else:
+                    ext = os.path.splitext(entry)[1].lower()
+                    size = os.path.getsize(full_path)
+                    nodes.append({
+                        "name": entry,
+                        "path": rel_path,
+                        "type": "file",
+                        "size": size,
+                    })
+
+            return nodes
+
+        tree = build_tree(pf.folder_path)
+        return {"project_id": pf.id, "folder_name": pf.folder_name, "tree": tree}
+
+    @app.get("/projects/{project_id}/file/{file_path:path}", summary="查看文件内容")
+    async def get_project_file_content(
+        project_id: int,
+        file_path: str,
+        db: Session = Depends(get_db),
+        current_user: User = Depends(get_current_user),
+    ):
+        """查看项目中的文件内容"""
+        import urllib.parse
+
+        pf = db.query(ProjectFolder).filter(
+            ProjectFolder.id == project_id,
+            ProjectFolder.user_id == current_user.id
+        ).first()
+
+        if not pf:
+            raise HTTPException(status_code=404, detail="项目不存在")
+
+        # URL 解码文件路径
+        file_path = urllib.parse.unquote(file_path)
+
+        full_path = os.path.join(pf.folder_path, file_path)
+        full_path = os.path.normpath(full_path)
+
+        # 安全检查：确保文件路径在项目目录内
+        if not full_path.startswith(os.path.normpath(pf.folder_path)):
+            raise HTTPException(status_code=403, detail="非法路径")
+
+        if not os.path.exists(full_path):
+            raise HTTPException(status_code=404, detail="文件不存在")
+
+        if os.path.isdir(full_path):
+            raise HTTPException(status_code=400, detail="不能查看目录")
+
+        content_info = read_file_content(full_path)
+
+        return {
+            "name": os.path.basename(full_path),
+            "path": file_path,
+            "content": content_info["content"],
+            "content_type": content_info["content_type"],
+            "language": content_info["language"],
+            "is_binary": content_info["is_binary"],
+            "image_url": content_info["image_url"],
+            "size": content_info["size"],
+            "error": content_info["error"],
+        }
+
+    # ==================== 知识库管理接口（基于 ChromaDB 向量库） ====================
+
+    @app.get("/knowledge/stats", summary="获取知识库统计")
+    async def get_knowledge_stats(
+        current_user: User = Depends(get_current_user),
+    ):
+        """获取当前用户的知识库统计信息"""
+        stats = vector_db.get_stats(current_user.id)
+        return stats
+
+    @app.get("/knowledge/list", summary="获取知识库文档列表")
+    async def get_knowledge_list(
+        current_user: User = Depends(get_current_user),
+    ):
+        """获取当前用户的所有知识文档"""
+        from app.vector_db import vector_db
+        collection = vector_db._get_collection(current_user.id)
+        count = collection.count()
+        if count == 0:
+            return {"knowledge": [], "total": 0}
+
+        # 获取所有文档
+        results = collection.get()
+        knowledge = []
+        for i, doc_id in enumerate(results["ids"]):
+            knowledge.append({
+                "doc_id": doc_id,
+                "content": results["documents"][i],
+                "metadata": results["metadatas"][i] if results["metadatas"] else {},
+                "created_at": datetime.now().isoformat(),
+            })
+        return {"knowledge": knowledge, "total": len(knowledge)}
+
+    @app.post("/knowledge/add", summary="添加知识文档")
     async def add_knowledge(
         request: AddKnowledgeRequest,
         current_user: User = Depends(get_current_user),
     ):
-        try:
-            doc_id = vector_db.add_document(request.content, current_user.id, request.metadata)
-            return {"message": "测试文档添加成功", "doc_id": doc_id}
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"添加测试文档失败: {str(e)}")
+        """添加知识文档到向量数据库"""
+        from app.vector_db import vector_db
+        doc_id = vector_db.add_document(request.content, current_user.id, request.metadata)
+        return {"doc_id": doc_id, "message": "知识添加成功"}
 
-    @app.post("/knowledge/search", response_model=SearchResponse, summary="搜索测试文档")
-    async def search_knowledge(
-        request: SearchRequest,
-        current_user: User = Depends(get_current_user),
-    ):
-        try:
-            results = vector_db.search(request.query, current_user.id, request.top_k)
-            return SearchResponse(results=[
-                {
-                    "score": r["score"],
-                    "content": r["document"]["content"],
-                    "metadata": r["document"]["metadata"]
-                }
-                for r in results
-            ])
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"搜索测试文档失败: {str(e)}")
-
-    @app.get("/knowledge/stats", response_model=KnowledgeStatsResponse, summary="测试文档统计")
-    async def knowledge_stats(current_user: User = Depends(get_current_user)):
-        return vector_db.get_stats(current_user.id)
-
-    @app.delete("/knowledge/{doc_id}", summary="删除测试文档")
+    @app.delete("/knowledge/{doc_id}", summary="删除知识文档")
     async def delete_knowledge(
         doc_id: str,
         current_user: User = Depends(get_current_user),
     ):
+        """删除指定的知识文档"""
+        from app.vector_db import vector_db
         success = vector_db.delete_document(doc_id, current_user.id)
         if not success:
-            raise HTTPException(status_code=404, detail=f"文档 {doc_id} 不存在")
-        return {"message": f"文档 {doc_id} 已删除"}
+            raise HTTPException(status_code=404, detail="文档不存在")
+        return {"message": "删除成功"}
 
-    @app.delete("/knowledge/clear", summary="清空测试文档库")
-    async def clear_knowledge(current_user: User = Depends(get_current_user)):
-        vector_db.clear_all(current_user.id)
-        return {"message": "测试文档库已清空"}
-
-    @app.get("/knowledge/list", summary="获取测试文档列表")
-    async def list_knowledge(
-        current_user: User = Depends(get_current_user),
-    ):
-        try:
-            collection = vector_db._get_collection(current_user.id)
-            all_docs = collection.get()
-
-            knowledge_list = []
-            for doc_id, doc_content, metadata in zip(
-                all_docs["ids"],
-                all_docs["documents"],
-                all_docs["metadatas"]
-            ):
-                knowledge_list.append({
-                    "doc_id": doc_id,
-                    "content": doc_content,
-                    "metadata": metadata or {},
-                })
-
-            return {"knowledge": knowledge_list, "total": len(knowledge_list)}
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"获取测试文档列表失败: {str(e)}")
-
-    @app.put("/knowledge/{doc_id}", summary="编辑测试文档")
+    @app.put("/knowledge/{doc_id}", summary="更新知识文档")
     async def update_knowledge(
         doc_id: str,
         request: AddKnowledgeRequest,
         current_user: User = Depends(get_current_user),
     ):
-        try:
-            collection = vector_db._get_collection(current_user.id)
-            existing = collection.get(ids=[doc_id])
-            if not existing["ids"]:
-                raise HTTPException(status_code=404, detail=f"文档 {doc_id} 不存在")
+        """更新知识文档内容（先删除旧的，再添加新的）"""
+        from app.vector_db import vector_db
+        # 先删除旧的
+        vector_db.delete_document(doc_id, current_user.id)
+        # 再添加新的（保留原 doc_id）
+        collection = vector_db._get_collection(current_user.id)
+        metadata = request.metadata or {"updated": "true"}
+        collection.add(
+            documents=[request.content],
+            ids=[doc_id],
+            metadatas=[metadata]
+        )
+        return {"doc_id": doc_id, "message": "更新成功"}
 
-            collection.delete(ids=[doc_id])
-            collection.add(
-                documents=[request.content],
-                ids=[doc_id],
-                metadatas=[request.metadata if request.metadata else {"updated": "true"}]
-            )
-            return {"message": "测试文档更新成功", "doc_id": doc_id}
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"更新测试文档失败: {str(e)}")
+    # ==================== 统一对话接口（SSE 流式） ====================
 
-    # ==================== 统一对话入口 ====================
-
-    @app.post("/chat", response_model=ChatResponse, summary="统一对话入口")
-    async def chat(
+    @app.post("/chat/stream", summary="流式统一对话接口（SSE 实时推送）")
+    async def chat_stream(
         request: ChatRequest,
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db),
     ):
-        """
-        统一对话接口：自动识别用户意图并路由到对应功能模块
-        """
+        """流式统一对话接口：SSE 实时推送 AI 回答，支持 RAG 知识库问答"""
+        import asyncio
+        from openai import OpenAI
+
         session_id = request.session_id
         file_id = request.file_id
 
-        # 如果没有提供 session_id，自动创建新会话
         if not session_id:
             session_id = uuid.uuid4().hex[:16]
             session = SessionModel(
@@ -821,7 +965,6 @@ def register_routes(app):
             db.add(session)
             db.commit()
 
-        # 处理文件引用
         effective_content = request.content
         file_info = None
         if file_id:
@@ -840,186 +983,201 @@ def register_routes(app):
                 "file_type": doc.file_type,
             }
 
-        # 1. 意图识别
+        ai_config = _get_user_ai_config(current_user.id, db)
+        system_prompt = "你是一个专业的软件测试助手。请回答用户的问题。"
+
+        # RAG 模式：先检索知识库，然后将知识注入 prompt
+        if request.use_rag:
+            try:
+                from app.vector_db import vector_db
+                search_results = vector_db.search(effective_content, current_user.id, top_k=3)
+
+                if search_results:
+                    knowledge_context = "\n\n参考知识：\n" + "\n".join(
+                        f"- {r['document']['content']}" for r in search_results
+                    )
+                    effective_content = f"{effective_content}{knowledge_context}"
+                    system_prompt = "你是一个专业的软件测试助手。请基于以下参考资料回答用户的问题，如果资料不足以回答问题，可以结合你自己的知识来回答。\n\n"
+            except Exception:
+                pass
+
+        # 检查是否是 web_test 意图
         intent_result = classify_intent_local(effective_content)
         intent = intent_result["intent"]
         confidence = intent_result["confidence"]
 
-        # 2. 路由
-        if intent == "code":
-            return await _handle_code_analysis(effective_content, request.content, current_user, db, intent, confidence, session_id, file_info)
-        elif intent == "case":
-            return await _handle_test_case(effective_content, request.content, current_user, db, intent, confidence, session_id, file_info)
-        elif intent == "knowledge":
-            return await _handle_knowledge(effective_content, request.content, current_user, db, intent, confidence, session_id, file_info)
-        else:
-            return await _handle_chat(effective_content, request.content, current_user, db, intent, confidence, session_id, request.use_rag, file_info)
+        if intent == "web_test":
+            from app.test_engine import run_test_task
 
-    async def _handle_code_analysis(ai_content, original_content, current_user, db, intent, confidence, session_id, file_info=None):
-        """处理代码分析意图"""
-        try:
-            ai_config = _get_user_ai_config(current_user.id, db)
-            from openai import OpenAI
+            url_match = re.search(r'https?://[^\s]+', effective_content)
+            test_url = url_match.group(0) if url_match else None
+            if not test_url and request.browser_url:
+                test_url = request.browser_url
 
-            client = OpenAI(api_key=ai_config["api_key"], base_url=ai_config.get("api_base_url", "https://api.openai.com/v1"))
-            from app.prompts import CODE_ANALYSIS_PROMPT
+            if not test_url:
+                async def _no_url_generator():
+                    yield f"data: {json.dumps({'type': 'error', 'message': '请提供要测试的网站 URL'}, ensure_ascii=False)}\n\n"
+                return StreamingResponse(_no_url_generator(), media_type="text/event-stream")
 
-            response = client.chat.completions.create(
-                model=ai_config["chat_model"],
-                messages=[
-                    {"role": "system", "content": CODE_ANALYSIS_PROMPT},
-                    {"role": "user", "content": ai_content}
-                ],
-                temperature=0.3,
-                max_tokens=2000,
-            )
+            project_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "test_project")
+            queue: asyncio.Queue = asyncio.Queue()
+            stop_event = asyncio.Event()
+            test_task_id = None
 
-            result = {"analysis": response.choices[0].message.content}
+            async def on_step(step_data):
+                await queue.put(step_data)
 
-            input_text = f"[引用文件] {original_content}" if file_info else original_content
-            conversation = Conversation(
-                user_id=current_user.id,
-                session_id=session_id,
-                module="code",
-                input_text=input_text,
-                output_data=json.dumps(result, ensure_ascii=False),
-            )
-            db.add(conversation)
-            _update_session_name(db, session_id, input_text)
-            db.commit()
+            async def _event_generator():
+                nonlocal test_task_id
 
-            return ChatResponse(
-                intent=intent,
-                confidence=confidence,
-                module="code",
-                data=result,
-                message="代码分析完成",
-                session_id=session_id,
-            )
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"代码分析失败: {str(e)}")
+                async def _run():
+                    nonlocal test_task_id
+                    try:
+                        result = await run_test_task(
+                            target_url=test_url,
+                            project_path=project_path,
+                            test_goals=[effective_content],
+                            ai_config=ai_config,
+                            max_steps=20,
+                            on_step=on_step,
+                            stop_event=stop_event,
+                        )
+                        test_task_id = result.get("task_id")
+                        status = result.get("status", "completed")
+                        if status == "cancelled":
+                            await queue.put({
+                                "type": "cancelled",
+                                "message": result.get("message", "测试已停止"),
+                                "total_steps": len(result.get("steps", [])),
+                                "code_issues": result.get("code_issues", []),
+                            })
+                        else:
+                            await queue.put({
+                                "type": "done",
+                                "status": status,
+                                "message": result.get("message", "测试完成"),
+                                "total_steps": len(result.get("steps", [])),
+                                "code_issues": result.get("code_issues", []),
+                            })
+                    except Exception as e:
+                        await queue.put({"type": "error", "message": str(e)})
+                    finally:
+                        await queue.put(None)
 
-    async def _handle_test_case(ai_content, original_content, current_user, db, intent, confidence, session_id, file_info=None):
-        """处理测试用例生成意图"""
-        try:
-            ai_config = _get_user_ai_config(current_user.id, db)
-            from openai import OpenAI
+                task = asyncio.create_task(_run())
+                while test_task_id is None:
+                    await asyncio.sleep(0.05)
+                    if task.done():
+                        break
 
-            client = OpenAI(api_key=ai_config["api_key"], base_url=ai_config.get("api_base_url", "https://api.openai.com/v1"))
-            from app.prompts import TEST_CASE_PROMPT
+                yield f"data: {json.dumps({'type': 'start', 'url': test_url, 'message': f'开始测试 {test_url}', 'task_id': test_task_id}, ensure_ascii=False)}\n\n"
 
-            response = client.chat.completions.create(
-                model=ai_config["chat_model"],
-                messages=[
-                    {"role": "system", "content": TEST_CASE_PROMPT},
-                    {"role": "user", "content": ai_content}
-                ],
-                temperature=0.5,
-                max_tokens=4000,
-            )
+                while True:
+                    event = await queue.get()
+                    if event is None:
+                        break
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
-            result = {"cases": response.choices[0].message.content, "total": 1}
+                yield "data: [DONE]\n\n"
 
-            input_text = f"[引用文件] {original_content}" if file_info else original_content
-            conversation = Conversation(
-                user_id=current_user.id,
-                session_id=session_id,
-                module="case",
-                input_text=input_text,
-                output_data=json.dumps(result, ensure_ascii=False),
-            )
-            db.add(conversation)
-            _update_session_name(db, session_id, input_text)
-            db.commit()
+            return StreamingResponse(_event_generator(), media_type="text/event-stream")
 
-            return ChatResponse(
-                intent=intent,
-                confidence=confidence,
-                module="case",
-                data=result,
-                message="测试用例生成完成",
-                session_id=session_id,
-            )
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"测试用例生成失败: {str(e)}")
+        # 普通对话：流式调用 LLM
+        client = OpenAI(api_key=ai_config["api_key"], base_url=ai_config.get("api_base_url", "https://api.openai.com/v1"))
 
-    async def _handle_knowledge(ai_content, original_content, current_user, db, intent, confidence, session_id, file_info=None):
-        try:
-            doc_id = vector_db.add_document(ai_content, current_user.id)
-            response = ChatResponse(
-                intent=intent,
-                confidence=confidence,
-                module="knowledge",
-                data={"doc_id": doc_id},
-                message="测试文档已添加",
-                session_id=session_id,
-            )
+        async def _stream_generator():
+            full_text = ""
+            queue: asyncio.Queue = asyncio.Queue()
+            import threading
 
-            input_text = f"[引用文件] {original_content}" if file_info else original_content
-            conversation = Conversation(
-                user_id=current_user.id,
-                session_id=session_id,
-                module="knowledge",
-                input_text=input_text,
-                output_data=json.dumps({"doc_id": doc_id}, ensure_ascii=False),
-            )
-            db.add(conversation)
-            _update_session_name(db, session_id, input_text)
-            db.commit()
+            def _fetch_stream():
+                """在线程中执行流式请求，通过 queue 传递结果"""
+                nonlocal full_text
+                try:
+                    # 加载该 session 的历史对话（最近 10 轮）
+                    history_limit = 10
+                    history_convs = db.query(Conversation).filter(
+                        Conversation.user_id == current_user.id,
+                        Conversation.session_id == session_id,
+                        Conversation.module == "chat"
+                    ).order_by(Conversation.created_at.desc()).limit(history_limit).all()
 
-            return response
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"添加测试文档失败: {str(e)}")
+                    # 反转为时间正序
+                    history_convs.reverse()
 
-    async def _handle_chat(ai_content, original_content, current_user, db, intent, confidence, session_id, use_rag=False, file_info=None):
-        """处理闲聊/通用对话意图"""
-        try:
-            ai_config = _get_user_ai_config(current_user.id, db)
+                    # 构建包含历史上下文的 messages
+                    messages = [{"role": "system", "content": system_prompt}]
+                    for conv in history_convs:
+                        # 添加用户消息
+                        messages.append({"role": "user", "content": conv.input_text})
+                        # 添加 AI 回复
+                        try:
+                            output = json.loads(conv.output_data)
+                            answer = output.get("answer", "")
+                            if answer:
+                                messages.append({"role": "assistant", "content": answer})
+                        except:
+                            pass
+                    # 添加当前用户消息
+                    messages.append({"role": "user", "content": effective_content})
 
-            if use_rag:
-                result = answer_with_knowledge(ai_content, current_user.id, top_k=3, ai_config=ai_config)
+                    response = client.chat.completions.create(
+                        model=ai_config["chat_model"],
+                        messages=messages,
+                        temperature=0.7,
+                        stream=True,
+                    )
+                    for chunk in response:
+                        if chunk.choices and chunk.choices[0].delta.content:
+                            content = chunk.choices[0].delta.content
+                            full_text += content
+                            queue.put_nowait(content)
+                    queue.put_nowait(None)  # 结束标记
+                except Exception as e:
+                    queue.put_nowait({"error": str(e)})
+
+            yield f"data: {json.dumps({'type': 'meta', 'intent': 'chat', 'confidence': confidence, 'session_id': session_id}, ensure_ascii=False)}\n\n"
+
+            try:
+                t = threading.Thread(target=_fetch_stream, daemon=True)
+                t.start()
+
+                while True:
+                    item = await queue.get()
+                    if item is None:
+                        break
+                    if isinstance(item, dict) and "error" in item:
+                        raise Exception(item["error"])
+                    yield f"data: {json.dumps({'type': 'chunk', 'content': item}, ensure_ascii=False)}\n\n"
+
+                t.join()
+            finally:
+                # 无论正常结束还是连接中断，都保存对话记录
                 chat_data = {
-                    "answer": result["answer"],
-                    "references": result["references"],
-                    "has_knowledge": result["has_knowledge"]
-                }
-                message = "测试文档问答完成"
-            else:
-                result = direct_chat(ai_content, ai_config)
-                chat_data = {
-                    "answer": result,
+                    "answer": full_text,
                     "references": [],
-                    "has_knowledge": False
+                    "has_knowledge": request.use_rag,
                 }
-                message = "AI 回复完成"
+                input_text = f"[引用文件] {request.content}" if file_info else request.content
+                conversation = Conversation(
+                    user_id=current_user.id,
+                    session_id=session_id,
+                    module="chat",
+                    input_text=input_text,
+                    output_data=json.dumps(chat_data, ensure_ascii=False),
+                )
+                db.add(conversation)
+                _update_session_name(db, session_id, input_text)
+                db.commit()
 
-            if file_info:
-                chat_data["file_reference"] = file_info
+                # 尝试发送 done 事件（如果连接已断开会被静默忽略）
+                try:
+                    yield f"data: {json.dumps({'type': 'done', 'data': chat_data, 'message': 'AI 回复完成', 'conv_id': conversation.id}, ensure_ascii=False)}\n\n"
+                    yield "data: [DONE]\n\n"
+                except Exception:
+                    pass
 
-            response = ChatResponse(
-                intent=intent,
-                confidence=confidence,
-                module="chat",
-                data=chat_data,
-                message=message,
-                session_id=session_id,
-            )
-
-            input_text = f"[引用文件] {original_content}" if file_info else original_content
-            conversation = Conversation(
-                user_id=current_user.id,
-                session_id=session_id,
-                module="chat",
-                input_text=input_text,
-                output_data=json.dumps(chat_data, ensure_ascii=False),
-            )
-            db.add(conversation)
-            _update_session_name(db, session_id, input_text)
-            db.commit()
-
-            return response
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"对话失败: {str(e)}")
+        return StreamingResponse(_stream_generator(), media_type="text/event-stream")
 
     def _update_session_name(db: Session, session_id: str, first_message: str):
         """自动用第一条消息作为会话名，并更新会话时间戳"""
@@ -1029,7 +1187,7 @@ def register_routes(app):
         if session:
             if session.name == "新会话":
                 session.name = first_message[:20] + ("..." if len(first_message) > 20 else "")
-            session.updated_at = datetime.now(timezone.utc)
+            session.updated_at = datetime.now()
 
     # 前端首页（公开）
     @app.get("/")
@@ -1188,7 +1346,7 @@ def register_routes(app):
             message=task_data.get("message", ""),
         )
 
-    @app.post("/test/project/files", summary="获取项目文件列表")
+    @app.get("/test/project/files", summary="获取项目文件列表")
     async def get_project_files(
         project_path: str,
         db: Session = Depends(get_db),
@@ -1214,3 +1372,119 @@ def register_routes(app):
                     })
 
         return {"project_path": project_path, "files": files[:500]}
+
+    @app.post("/test/stream", summary="流式执行 Web 自动化测试（SSE）")
+    async def stream_test(
+        request: TestRequest,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        """SSE 流式测试接口：实时推送每个测试步骤"""
+        from app.test_engine import run_test_task
+        import asyncio
+
+        ai_config = _get_user_ai_config(current_user.id, db)
+
+        # 提取 URL：优先从内容中提取，其次使用浏览器面板当前URL
+        url_match = re.search(r'https?://[^\s]+', request.content)
+        test_url = url_match.group(0) if url_match else None
+
+        if not test_url and request.browser_url:
+            test_url = request.browser_url
+
+        if not test_url:
+            async def _no_url_generator():
+                yield f"data: {json.dumps({'type': 'error', 'message': '请提供要测试的网站 URL'}, ensure_ascii=False)}\n\n"
+            return StreamingResponse(_no_url_generator(), media_type="text/event-stream")
+
+        project_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "test_project")
+
+        # 使用 Queue 在回调和生成器之间传递事件
+        queue: asyncio.Queue = asyncio.Queue()
+        stop_event = asyncio.Event()
+
+        async def on_step(step_data):
+            await queue.put(step_data)
+
+        # 预先生成 task_id，前端可通过 start 事件获取
+        test_task_id = None
+
+        async def _event_generator():
+            nonlocal test_task_id
+
+            # 在后台运行测试任务
+            async def _run():
+                nonlocal test_task_id
+                try:
+                    result = await run_test_task(
+                        target_url=test_url,
+                        project_path=project_path,
+                        test_goals=[request.content],
+                        ai_config=ai_config,
+                        max_steps=20,
+                        on_step=on_step,
+                        stop_event=stop_event,
+                    )
+                    test_task_id = result.get("task_id")
+                    status = result.get("status", "completed")
+                    if status == "cancelled":
+                        await queue.put({
+                            "type": "cancelled",
+                            "message": result.get("message", "测试已停止"),
+                            "total_steps": len(result.get("steps", [])),
+                            "code_issues": result.get("code_issues", []),
+                        })
+                    else:
+                        await queue.put({
+                            "type": "done",
+                            "status": status,
+                            "message": result.get("message", "测试完成"),
+                            "total_steps": len(result.get("steps", [])),
+                            "code_issues": result.get("code_issues", []),
+                        })
+                except Exception as e:
+                    await queue.put({"type": "error", "message": str(e)})
+                finally:
+                    await queue.put(None)  # 结束信号
+
+            task = asyncio.create_task(_run())
+
+            # 等待 task_id 生成后推送开始事件
+            while test_task_id is None:
+                await asyncio.sleep(0.05)
+                if task.done():
+                    break
+
+            # 推送开始事件（包含 task_id 以便前端停止测试）
+            yield f"data: {json.dumps({'type': 'start', 'url': test_url, 'message': f'开始测试 {test_url}', 'task_id': test_task_id}, ensure_ascii=False)}\n\n"
+
+            # 从队列读取事件并推送
+            while True:
+                event = await queue.get()
+                if event is None:
+                    break
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(_event_generator(), media_type="text/event-stream")
+
+    @app.post("/test/stop/{task_id}", summary="停止正在运行的测试任务")
+    async def stop_test(
+        task_id: str,
+        current_user: User = Depends(get_current_user),
+    ):
+        """停止指定测试任务"""
+        from app.test_engine import running_test_tasks
+
+        task = running_test_tasks.get(task_id)
+        if not task:
+            return {"success": False, "message": "测试任务不存在或已结束"}
+
+        # 触发停止事件
+        stop_event = task.get("stop_event")
+        if stop_event:
+            stop_event.set()
+            task["status"] = "stopping"
+
+        return {"success": True, "message": "已发送停止信号"}
