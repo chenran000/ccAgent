@@ -819,6 +819,29 @@ def register_routes(app):
             for root in roots
         )
 
+    def _resolve_project_path(user_id: int, project_id, db: Session) -> str:
+        """解析测试任务的项目目录
+
+        指定 project_id 时使用该用户的托管项目（代码定位/修复链路可用）；
+        未指定时回落默认 test_project 目录并自动创建，保证测试入口开箱可用。
+        """
+        if project_id:
+            folder = db.query(ProjectFolder).filter(
+                ProjectFolder.id == project_id,
+                ProjectFolder.user_id == user_id,
+            ).first()
+            if not folder:
+                raise HTTPException(status_code=404, detail="项目不存在")
+            if not os.path.isdir(folder.folder_path):
+                raise HTTPException(status_code=400, detail="项目目录已丢失，请重新上传该项目")
+            if not _is_allowed_project_path(folder.folder_path):
+                raise HTTPException(status_code=403, detail="项目路径不在允许的目录内")
+            return folder.folder_path
+
+        default_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "test_project")
+        os.makedirs(default_path, exist_ok=True)
+        return default_path
+
     @app.get("/projects", response_model=ProjectFolderListResponse, summary="获取项目文件夹列表")
     async def list_project_folders(
         current_user: User = Depends(get_current_user),
@@ -1218,7 +1241,7 @@ def register_routes(app):
                     yield f"data: {json.dumps({'type': 'error', 'message': '请提供要测试的网站 URL'}, ensure_ascii=False)}\n\n"
                 return StreamingResponse(_no_url_generator(), media_type="text/event-stream")
 
-            project_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "test_project")
+            project_path = _resolve_project_path(current_user.id, request.project_id, db)
             task_id = uuid.uuid4().hex[:16]
             task_state = new_task_state(
                 task_id=task_id,
@@ -1565,7 +1588,7 @@ def register_routes(app):
                 yield f"data: {json.dumps({'type': 'error', 'message': '请提供要测试的网站 URL'}, ensure_ascii=False)}\n\n"
             return StreamingResponse(_no_url_generator(), media_type="text/event-stream")
 
-        project_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "test_project")
+        project_path = _resolve_project_path(current_user.id, request.project_id, db)
 
         task_id = uuid.uuid4().hex[:16]
         task_state = new_task_state(

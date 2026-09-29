@@ -168,7 +168,7 @@ await_fix:interrupt() 暂停 → /test/code/fix 逐个确认 → AI 补丁自动
 | 对话 | POST /chat/stream(SSE,五类意图路由) |
 | 测试 Agent | POST /test/run · POST /test/stream(SSE) · POST /test/resume/{id}(SSE) · GET /test/tasks/{id} · POST /test/stop/{id} · POST /test/code/fix · GET /test/project/files |
 
-测试入口公共参数:`use_vision`(None 跟随全局)、`storage_state`(登录态档案名)、`max_steps`(run)。
+测试入口公共参数:`use_vision`(None 跟随全局)、`storage_state`(登录态档案名)、`max_steps`(run)、`project_id`(托管项目ID,/chat/stream 与 /test/stream 可选;指定时代码定位与修复写入该项目,缺省回落自动创建的 test_project 目录)。
 
 ## 技术栈
 

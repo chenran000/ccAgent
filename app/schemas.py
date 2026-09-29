@@ -110,6 +110,7 @@ class ChatRequest(BaseModel):
     browser_url: Optional[str] = None  # 浏览器面板当前打开的URL
     use_vision: Optional[bool] = None  # 视觉感知开关（None 跟随全局 TEST_AGENT_VISION 配置）
     storage_state: Optional[str] = None  # 登录态档案名（首次执行保存，后续复用免登录）
+    project_id: Optional[int] = None  # 托管项目ID（提供时测试产物/代码修复写入该项目；缺省用 test_project）
 
 # ========== AI 模型管理相关模型 ==========
 
@@ -185,6 +186,7 @@ class TestRequest(BaseModel):
     browser_url: Optional[str] = None  # 浏览器面板当前打开的URL
     use_vision: Optional[bool] = None  # 视觉感知开关（None 跟随全局 TEST_AGENT_VISION 配置）
     storage_state: Optional[str] = None  # 登录态档案名（首次执行保存，后续复用免登录）
+    project_id: Optional[int] = None  # 托管项目ID（提供时测试产物/代码修复写入该项目；缺省用 test_project）
 
 class TestStep(BaseModel):
     """测试步骤"""
