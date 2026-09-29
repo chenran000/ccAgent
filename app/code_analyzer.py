@@ -1,37 +1,26 @@
 """代码分析/定位/修改模块"""
 import os
-import re
-import json
 from typing import Optional
 
-import openai
-
+from app.llm import CodeFixResult, create_structured
 from app.prompts import CODE_FIX_PROMPT
 
 
-def _clean_json_output(text: str) -> str:
-    """清理AI返回结果中的代码块标记"""
-    if text.startswith("```json"):
-        text = text[7:]
-    if text.startswith("```"):
-        text = text[3:]
-    if text.endswith("```"):
-        text = text[:-3]
-    return text.strip()
+def _resolve_within_root(file_path: str, allowed_root: str):
+    """把 file_path 解析为 allowed_root 内的绝对路径；越界或未提供根目录时返回 None
 
-
-def _parse_json_safely(text: str) -> dict:
-    """安全地解析JSON"""
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        json_match = re.search(r'\{[\s\S]*\}', text)
-        if json_match:
-            try:
-                return json.loads(json_match.group())
-            except Exception:
-                pass
-        return {}
+    防两类绕过：../ 上跳（abspath 归一化处理）与同级目录前缀混淆（用分隔符后缀比对）。
+    相对路径按项目根目录拼接（LLM 常返回相对路径）。
+    """
+    if not allowed_root:
+        return None
+    root = os.path.abspath(allowed_root)
+    candidate = file_path if os.path.isabs(file_path) else os.path.join(root, file_path)
+    candidate = os.path.abspath(candidate)
+    root_prefix = root.rstrip(os.sep) + os.sep
+    if candidate != root and not candidate.startswith(root_prefix):
+        return None
+    return candidate
 
 
 def read_file_content(file_path: str, max_lines: int = 500) -> Optional[str]:
@@ -46,16 +35,20 @@ def read_file_content(file_path: str, max_lines: int = 500) -> Optional[str]:
         return None
 
 
-def write_file_content(file_path: str, content: str) -> bool:
-    """写入文件内容"""
+def write_file_content(file_path: str, content: str, allowed_root: str = "") -> bool:
+    """写入文件内容（提供 allowed_root 时强制路径围栏）"""
+    target = _resolve_within_root(file_path, allowed_root)
+    if not target:
+        print(f"写入文件被拒绝（路径越界）: {file_path}")
+        return False
     try:
         # 备份原文件
-        backup_path = file_path + ".bak"
-        if os.path.isfile(file_path):
+        backup_path = target + ".bak"
+        if os.path.isfile(target):
             import shutil
-            shutil.copy2(file_path, backup_path)
+            shutil.copy2(target, backup_path)
 
-        with open(file_path, 'w', encoding='utf-8') as f:
+        with open(target, 'w', encoding='utf-8') as f:
             f.write(content)
         return True
     except Exception as e:
@@ -70,7 +63,8 @@ def analyze_and_fix_code(
     issue_description: str,
     suggested_fix: str,
     ai_config: dict,
-    auto_fix: bool = False
+    auto_fix: bool = False,
+    allowed_root: str = ""
 ) -> dict:
     """
     分析代码问题并生成修复方案
@@ -98,10 +92,15 @@ def analyze_and_fix_code(
     if not ai_config or not ai_config.get("api_key"):
         return {"success": False, "message": "未配置AI模型"}
 
+    # 路径围栏：AI 给出的 file_path 只允许落在项目目录内
+    resolved_path = _resolve_within_root(file_path, allowed_root)
+    if not resolved_path:
+        return {"success": False, "message": f"文件路径越界，已拒绝访问: {file_path}"}
+
     # 读取文件内容
-    content = read_file_content(file_path)
+    content = read_file_content(resolved_path)
     if content is None:
-        return {"success": False, "message": f"无法读取文件: {file_path}"}
+        return {"success": False, "message": f"无法读取文件: {resolved_path}"}
 
     # 获取问题行附近的代码上下文
     lines = content.split('\n')
@@ -115,15 +114,6 @@ def analyze_and_fix_code(
     for i, line in enumerate(context_lines, start=context_start + 1):
         marker = ">>>" if i == line_number else "   "
         marked_context += f"{marker} {i:4d}: {line}\n"
-
-    client = openai.OpenAI(
-        api_key=ai_config["api_key"],
-        base_url=ai_config["api_base_url"]
-    )
-
-    messages = [
-        {"role": "system", "content": CODE_FIX_PROMPT}
-    ]
 
     user_content = f"""文件路径: {file_path}
 问题行号: {line_number}
@@ -140,35 +130,34 @@ def analyze_and_fix_code(
 3. 只返回需要修改的代码行及其上下文
 """
 
-    messages.append({"role": "user", "content": user_content})
+    messages = [
+        {"role": "system", "content": CODE_FIX_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
 
     try:
-        response = client.chat.completions.create(
-            model=ai_config["chat_model"],
-            messages=messages,
+        fix_result = create_structured(
+            ai_config,
+            CodeFixResult,
+            messages,
             temperature=0.1,
             max_tokens=2000,
         )
 
-        result_text = response.choices[0].message.content.strip()
-
-        # 解析AI返回的修复代码
-        fix_result = _extract_fix_result(result_text)
-
         result = {
-            "file_path": file_path,
+            "file_path": resolved_path,
             "line_number": line_number,
             "original_code": context,
-            "fixed_code": fix_result.get("fixed_code", ""),
-            "fix_description": fix_result.get("fix_description", result_text),
+            "fixed_code": fix_result.fixed_code,
+            "fix_description": fix_result.fix_description,
             "success": True,
             "message": "代码分析完成"
         }
 
         # 如果自动修复,直接应用
-        if auto_fix and fix_result.get("fixed_code"):
-            new_content = _apply_fix(content, line_number, context, fix_result["fixed_code"])
-            if write_file_content(file_path, new_content):
+        if auto_fix and fix_result.fixed_code:
+            new_content = _apply_fix(content, line_number, context, fix_result.fixed_code)
+            if write_file_content(resolved_path, new_content, allowed_root):
                 result["message"] = "代码已自动修复"
             else:
                 result["message"] = "代码修复失败"
@@ -177,34 +166,6 @@ def analyze_and_fix_code(
 
     except Exception as e:
         return {"success": False, "message": f"AI调用失败: {str(e)}"}
-
-
-def _extract_fix_result(text: str) -> dict:
-    """从AI返回结果中提取修复代码"""
-    # 尝试提取代码块
-    code_block = re.search(r'```(?:\w+)?\n([\s\S]*?)\n```', text)
-    if code_block:
-        return {
-            "fixed_code": code_block.group(1),
-            "fix_description": text[:code_block.start()].strip()
-        }
-
-    # 尝试JSON解析
-    cleaned = _clean_json_output(text)
-    try:
-        data = json.loads(cleaned)
-        return {
-            "fixed_code": data.get("fixed_code", data.get("code", "")),
-            "fix_description": data.get("fix_description", data.get("description", ""))
-        }
-    except Exception:
-        pass
-
-    # 默认:整个返回作为修复代码
-    return {
-        "fixed_code": text,
-        "fix_description": ""
-    }
 
 
 def _apply_fix(

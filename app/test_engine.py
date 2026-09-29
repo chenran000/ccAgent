@@ -1,61 +1,77 @@
-"""Web 测试 Agent 核心模块 - Playwright 测试引擎"""
+"""Web 测试 Agent 的 AI 调用层
+
+单步决策与错误定位的 LLM 调用逻辑；任务循环编排已迁移到
+app/test_agent_graph.py（LangGraph 状态机 + SQLite 检查点持久化）。
+"""
 import json
-import re
-import uuid
-import asyncio
 import os
-from datetime import datetime, timezone
-from typing import List, Optional, Dict, Any
+import re
+from typing import List, Optional
 
 import openai
 
-from app.browser_capture import BrowserCapture
-from app.prompts import TEST_AGENT_PROMPT, CODE_ANALYSIS_PROMPT
-
-# 存储运行中的测试任务
-running_test_tasks: Dict[str, dict] = {}
+from app.llm import CodeIssueAnalysis, TestStepDecision, create_structured
+from app.prompts import TEST_AGENT_PROMPT, CODE_ANALYSIS_WEB_PROMPT
 
 
-def _clean_json_output(text: str) -> str:
-    """清理AI返回结果中的代码块标记"""
-    if text.startswith("```json"):
-        text = text[7:]
-    if text.startswith("```"):
-        text = text[3:]
-    if text.endswith("```"):
-        text = text[:-3]
-    return text.strip()
+def _render_elements(interactive_elements: List[dict]) -> str:
+    """把可交互元素列表渲染为提示词片段"""
+    if not interactive_elements:
+        return ""
+    lines = []
+    for el in interactive_elements:
+        desc = f"[{el.get('index', '')}] <{el.get('tag', '')}"
+        if el.get("type"):
+            desc += f" type={el['type']}"
+        label = el.get("text") or el.get("placeholder") or el.get("label") or ""
+        if label:
+            desc += f" {label}"
+        desc += ">"
+        lines.append(desc)
+    return "可交互元素列表:\n" + "\n".join(lines) + "\n\n"
 
 
-def _parse_json_safely(text: str) -> dict:
-    """安全地解析JSON"""
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        json_match = re.search(r'\{[\s\S]*\}', text)
-        if json_match:
-            try:
-                return json.loads(json_match.group())
-            except Exception:
-                pass
-        return {"action": "done", "target": "", "success": True, "reason": "解析失败"}
+def _render_digest(page_digest: Optional[dict]) -> str:
+    """把页面结构摘要渲染为提示词片段(纯文本感知模式替代截图)"""
+    if not page_digest:
+        return ""
+    lines = []
+    title = page_digest.get("title")
+    if title:
+        lines.append(f"页面标题: {title}")
+    headings = page_digest.get("headings") or []
+    if headings:
+        lines.append("标题结构: " + " | ".join(str(h) for h in headings))
+    forms = page_digest.get("forms") or []
+    if forms:
+        lines.append("表单概览: " + " ; ".join(str(f) for f in forms))
+    if not lines:
+        return ""
+    return "页面结构:\n" + "\n".join(lines) + "\n\n"
+
+
+def _render_extracted(extracted: Optional[dict]) -> str:
+    """把已提取变量渲染为提示词片段,供后续步骤比较"""
+    if not extracted:
+        return ""
+    items = [f"- {k} = '{str(v)[:60]}'" for k, v in list(extracted.items())[-8:]]
+    return "已提取变量:\n" + "\n".join(items) + "\n\n"
 
 
 def _call_ai_for_test_step(
     test_goal: str,
     current_url: str,
-    screenshot_base64: str,
     console_errors: List[str],
     network_errors: List[str],
     history: List[dict],
-    ai_config: dict
-) -> dict:
-    """调用AI决定下一步测试操作"""
-    client = openai.OpenAI(
-        api_key=ai_config["api_key"],
-        base_url=ai_config["api_base_url"]
-    )
-
+    ai_config: dict,
+    interactive_elements: Optional[List[dict]] = None,
+    page_digest: Optional[dict] = None,
+    use_vision: bool = False,
+    screenshot_base64: str = "",
+    extracted: Optional[dict] = None,
+) -> TestStepDecision:
+    """调用AI决定下一步测试操作(DOM 文本感知为主,视觉可选增强)"""
     history_text = ""
     for i, step in enumerate(history):
         status = "✅" if step["success"] else "❌"
@@ -70,11 +86,15 @@ def _call_ai_for_test_step(
     if network_errors:
         error_summary += "Network 错误:\n" + "\n".join(network_errors[:5]) + "\n"
 
+    digest_text = _render_digest(page_digest)
+    elements_text = _render_elements(interactive_elements)
+    extracted_text = _render_extracted(extracted)
+
     def _make_messages(include_image: bool) -> list:
         msgs = [{"role": "system", "content": TEST_AGENT_PROMPT}]
         user_text = f"""测试目标: {test_goal}
 当前URL: {current_url}
-历史操作:
+{digest_text}{elements_text}{extracted_text}历史操作:
 {history_text or "无"}
 
 {error_summary}
@@ -89,23 +109,35 @@ def _call_ai_for_test_step(
             msgs.append({"role": "user", "content": user_text})
         return msgs
 
-    # 尝试使用图片,如果API不支持图片则回退到纯文本
-    for include_image in [bool(screenshot_base64), False]:
-        try:
-            messages = _make_messages(include_image)
-            response = client.chat.completions.create(
-                model=ai_config["chat_model"],
-                messages=messages,
+    # 视觉关闭:直接纯文本决策,省掉截图开销与纯文本模型的无效回退往返
+    if not use_vision or not screenshot_base64:
+        return create_structured(
+            ai_config,
+            TestStepDecision,
+            _make_messages(False),
+            temperature=0.1,
+            max_tokens=500,
+        )
+
+    # 视觉开启:先携带截图,API 不支持图片时回退纯文本
+    try:
+        return create_structured(
+            ai_config,
+            TestStepDecision,
+            _make_messages(True),
+            temperature=0.1,
+            max_tokens=500,
+        )
+    except openai.BadRequestError as e:
+        if "image" in str(e).lower():
+            return create_structured(
+                ai_config,
+                TestStepDecision,
+                _make_messages(False),
                 temperature=0.1,
                 max_tokens=500,
             )
-            result_text = response.choices[0].message.content.strip()
-            result_text = _clean_json_output(result_text)
-            return _parse_json_safely(result_text)
-        except openai.BadRequestError as e:
-            if include_image and "image_url" in str(e):
-                continue  # 重试纯文本
-            raise
+        raise
 
 
 def _call_ai_for_code_analysis(
@@ -115,13 +147,8 @@ def _call_ai_for_code_analysis(
     project_path: str,
     screenshot_desc: str,
     ai_config: dict
-) -> dict:
+) -> CodeIssueAnalysis:
     """调用AI分析错误并定位代码"""
-    client = openai.OpenAI(
-        api_key=ai_config["api_key"],
-        base_url=ai_config["api_base_url"]
-    )
-
     # 获取项目文件结构
     project_files = _get_project_file_tree(project_path)
 
@@ -129,7 +156,7 @@ def _call_ai_for_code_analysis(
     relevant_code = _extract_error_context(error_log, console_errors, project_path)
 
     messages = [
-        {"role": "system", "content": CODE_ANALYSIS_PROMPT}
+        {"role": "system", "content": CODE_ANALYSIS_WEB_PROMPT}
     ]
 
     user_content = f"""项目路径: {project_path}
@@ -154,16 +181,13 @@ Network 错误:
 
     messages.append({"role": "user", "content": user_content})
 
-    response = client.chat.completions.create(
-        model=ai_config["chat_model"],
-        messages=messages,
+    return create_structured(
+        ai_config,
+        CodeIssueAnalysis,
+        messages,
         temperature=0.1,
         max_tokens=2000,
     )
-
-    result_text = response.choices[0].message.content.strip()
-    result_text = _clean_json_output(result_text)
-    return _parse_json_safely(result_text)
 
 
 def _get_project_file_tree(path: str, max_depth: int = 3) -> str:
@@ -246,219 +270,3 @@ def _extract_error_context(error_log: str, console_errors: List[str], project_pa
                         pass
 
     return "\n\n".join(context_parts) if context_parts else "无法提取相关代码上下文"
-
-
-async def run_test_task(
-    target_url: str,
-    project_path: str,
-    test_goals: List[str],
-    ai_config: dict,
-    max_steps: int = 30,
-    on_step: Any = None,  # async callback(step_data) called after each step
-    stop_event: Any = None,  # asyncio.Event to signal task cancellation
-) -> dict:
-    """
-    执行Web测试任务
-
-    Args:
-        target_url: 目标测试网址
-        project_path: 本地项目代码路径
-        test_goals: 测试目标列表
-        ai_config: AI配置
-        max_steps: 最大测试步骤数
-
-    Returns:
-        测试结果
-    """
-    if not ai_config or not ai_config.get("api_key"):
-        return {"error": "未配置AI模型"}
-
-    if not os.path.isdir(project_path):
-        return {"error": f"项目路径不存在: {project_path}"}
-
-    task_id = uuid.uuid4().hex[:16]
-    all_steps = []
-    all_code_issues = []
-    total_errors = 0
-    total_screenshots = 0
-
-    running_test_tasks[task_id] = {
-        "task_id": task_id,
-        "target_url": target_url,
-        "status": "running",
-        "steps": all_steps,
-        "code_issues": all_code_issues,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "project_path": project_path,
-        "stop_event": stop_event or asyncio.Event(),
-    }
-
-    browser = BrowserCapture(headless=False)  # 非headless以便观察
-    try:
-        await browser.start()
-        await browser.navigate(target_url)
-
-        # 对每个测试目标执行测试
-        for goal_idx, test_goal in enumerate(test_goals):
-            # 检查是否已停止
-            if running_test_tasks[task_id]["stop_event"].is_set():
-                break
-
-            goal_steps = 0
-            step_num = len(all_steps) + 1
-
-            while goal_steps < max_steps and step_num <= max_steps:
-                # 检查是否已停止
-                if running_test_tasks[task_id]["stop_event"].is_set():
-                    break
-
-                # 1. 截图
-                screenshot = await browser.screenshot()
-                if screenshot:
-                    total_screenshots += 1
-
-                current_url = await browser.get_url()
-                errors = browser.get_errors()
-
-                # 2. 调用AI决定下一步操作
-                decision = _call_ai_for_test_step(
-                    test_goal=test_goal,
-                    current_url=current_url,
-                    screenshot_base64=screenshot or "",
-                    console_errors=errors["console"],
-                    network_errors=errors["network"],
-                    history=all_steps[-10:],  # 只给最近10步历史
-                    ai_config=ai_config,
-                )
-
-                action = decision.get("action", "done")
-                target = decision.get("target", "")
-                reason = decision.get("reason", "")
-
-                # 3. 执行操作
-                success = True
-                result = ""
-                try:
-                    if action == "click":
-                        await browser.click(target)
-                        result = f"已点击: {target}"
-                    elif action == "fill" or action == "type":
-                        text = decision.get("text", "")
-                        await browser.fill(target, text)
-                        result = f"已输入文本到 {target}: {text}"
-                    elif action == "navigate":
-                        url = decision.get("url", target)
-                        await browser.navigate(url)
-                        result = f"已导航到: {url}"
-                    elif action == "wait":
-                        wait_time = decision.get("wait_time", 1000)
-                        await browser.wait(wait_time)
-                        result = f"等待 {wait_time}ms"
-                    elif action == "press":
-                        key = decision.get("key", "Enter")
-                        await browser.press_key(key)
-                        result = f"已按键: {key}"
-                    elif action == "assert":
-                        is_visible = await browser.is_visible(target)
-                        success = is_visible
-                        result = f"断言元素 {target} {'可见' if is_visible else '不可见'}"
-                    elif action == "scroll":
-                        await browser.execute_script("window.scrollBy(0, 500)")
-                        result = "已向下滚动"
-                    elif action == "done" or action == "complete":
-                        result = decision.get("message", "测试完成")
-                        success = decision.get("success", True)
-                    else:
-                        result = f"未知操作: {action}"
-
-                except Exception as e:
-                    success = False
-                    result = f"操作失败: {str(e)}"
-
-                # 4. 收集错误
-                step_errors = browser.get_errors()
-
-                step_record = {
-                    "step": step_num,
-                    "action": action,
-                    "target": target or reason,
-                    "result": result,
-                    "success": success,
-                    "console_errors": step_errors["console"],
-                    "network_errors": step_errors["network"],
-                }
-
-                all_steps.append(step_record)
-
-                # 实时回调 - 推送当前步骤给前端
-                if on_step:
-                    try:
-                        await on_step({
-                            "type": "step",
-                            "step": step_num,
-                            "action": action,
-                            "target": target or reason,
-                            "result": result,
-                            "success": success,
-                            "console_errors": step_errors["console"],
-                            "network_errors": step_errors["network"],
-                        })
-                    except Exception:
-                        pass
-
-                step_num += 1
-                goal_steps += 1
-
-                # 如果AI判断完成,进入下一个测试目标
-                if action in ["done", "complete"]:
-                    break
-
-                # 如果有错误,截图并分析代码
-                if not success or (step_errors["console"] or step_errors["network"]):
-                    total_errors += 1
-
-                    # 如果AI判断任务完成或出错
-                    if decision.get("analyze_code", False) or not success:
-                        error_log = "\n".join(step_errors["console"] + step_errors["network"])
-                        issue_analysis = _call_ai_for_code_analysis(
-                            error_log=error_log,
-                            console_errors=step_errors["console"],
-                            network_errors=step_errors["network"],
-                            project_path=project_path,
-                            screenshot_desc=result,
-                            ai_config=ai_config,
-                        )
-
-                        if issue_analysis.get("file_path"):
-                            code_issue = {
-                                "file_path": issue_analysis.get("file_path", ""),
-                                "line_number": issue_analysis.get("line_number", 0),
-                                "issue_description": issue_analysis.get("issue_description", ""),
-                                "error_log": error_log,
-                                "suggested_fix": issue_analysis.get("suggested_fix", ""),
-                                "code_snippet": issue_analysis.get("code_snippet"),
-                            }
-                            all_code_issues.append(code_issue)
-
-                    # 清空错误缓存,继续测试
-                    browser.clear_errors()
-
-            # 进入下一个测试目标前等待
-            if goal_idx < len(test_goals) - 1:
-                await browser.navigate(target_url)  # 重新加载页面
-
-        # 检查是否被用户停止
-        if running_test_tasks[task_id]["stop_event"].is_set():
-            running_test_tasks[task_id]["status"] = "cancelled"
-            running_test_tasks[task_id]["message"] = "测试已停止"
-        else:
-            running_test_tasks[task_id]["status"] = "completed"
-            running_test_tasks[task_id]["message"] = f"测试完成，共 {total_errors} 个错误"
-
-    except Exception as e:
-        running_test_tasks[task_id]["status"] = "failed"
-        running_test_tasks[task_id]["message"] = f"测试执行失败: {str(e)}"
-    finally:
-        await browser.close()
-
-    return running_test_tasks[task_id]

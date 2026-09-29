@@ -1,4 +1,5 @@
 """API 路由定义模块 - TestAssistant AI"""
+import asyncio
 import json
 import os
 import re
@@ -24,16 +25,122 @@ from app.schemas import (
     ModelListResponse, AddModelRequest, UpdateModelRequest, TestAIRequest,
     TestAIResponse, ActiveModelResponse,
     TestTaskRequest, TestTaskResponse, TestStep, TestRequest,
+    CodeAnalysisRequest, CodeAnalysisResponse, TestCaseRequest, TestCaseResponse,
     CodeIssue, CodeModifyRequest,
     ProjectFolderInfo, ProjectFolderListResponse, ProjectFolderCreateRequest,
     FileNode, FileContentResponse,
     AddKnowledgeRequest,
 )
+from app.analysis_service import analyze_bug, generate_test_cases, review_code
+from app.config import TEST_AGENT_VISION
 from app.intent_classifier import classify_intent_local
-from app.vector_db import vector_db
+from app.llm import build_plain_client
+from app.vector_db import chunk_text, vector_db
 from app.file_parser import parse_file
 from app.file_storage import save_file, delete_file as delete_file_from_disk, get_user_upload_dir
 from app.file_viewer import read_file_content
+from app.test_agent_graph import (
+    active_runs,
+    make_config,
+    new_task_state,
+    stop_requested,
+    test_agent_manager,
+)
+from langgraph.types import Command
+
+
+def _extract_knowledge_content(content: str) -> str:
+    """从"添加知识/记住：xxx"类指令中提取知识正文,无指令前缀时原样返回"""
+    parts = re.split(r"[：:]", content, maxsplit=1)
+    if len(parts) == 2 and re.search(r"添加|记住|存档|保存|录入|知识", parts[0]):
+        body = parts[1].strip()
+        if body:
+            return body
+    return content
+
+
+def _resolve_use_vision(requested) -> bool:
+    """视觉感知开关:请求未指定时跟随全局 TEST_AGENT_VISION 配置"""
+    return TEST_AGENT_VISION if requested is None else bool(requested)
+
+
+def _state_to_response(task_id: str, values: dict) -> TestTaskResponse:
+    """把测试任务状态快照转换为 TestTaskResponse"""
+    steps = values.get("steps", [])
+    code_issues = values.get("code_issues", [])
+    return TestTaskResponse(
+        task_id=task_id,
+        target_url=values.get("target_url", ""),
+        status=values.get("status", "running"),
+        steps=[TestStep(**s) for s in steps],
+        errors_found=sum(
+            1 for s in steps
+            if s.get("console_errors") or s.get("network_errors") or not s.get("success")
+        ),
+        screenshots_saved=sum(1 for s in steps if s.get("screenshot")),
+        code_issues=[CodeIssue(**ci) for ci in code_issues],
+        message=values.get("message", ""),
+        script_path=values.get("script_path", ""),
+        report_path=values.get("report_path", ""),
+    )
+
+
+def _test_sse_response(graph_input, task_id: str, start_payload: dict = None) -> StreamingResponse:
+    """把测试 Agent 的执行过程包装为 SSE 流
+
+    graph_input: 初始 TestTaskState / None(从最后检查点恢复) / Command(resume=...)
+    事件经 astream(stream_mode="updates") 逐节点转换,替代原 Queue 回调拼接。
+    """
+
+    async def _event_generator():
+        graph = await test_agent_manager.get_graph()
+        config = make_config(task_id)
+        active_runs.add(task_id)
+        try:
+            # start 事件立即推送,前端第一时间拿到 task_id 用于停止/恢复
+            start_event = {"type": "start", "task_id": task_id, "message": f"开始测试任务 {task_id}"}
+            if start_payload:
+                start_event.update(start_payload)
+            yield f"data: {json.dumps(start_event, ensure_ascii=False)}\n\n"
+
+            async for chunk in graph.astream(graph_input, config=config, stream_mode="updates"):
+                if "__interrupt__" in chunk:
+                    # 到达人工确认点:本次运行暂停,等待 /test/code/fix 恢复
+                    yield f"data: {json.dumps({'type': 'waiting_confirm', 'message': '发现代码问题，等待人工确认修复'}, ensure_ascii=False)}\n\n"
+                    continue
+
+                for delta in chunk.values():
+                    if not isinstance(delta, dict):
+                        continue
+
+                    new_steps = delta.get("steps") or []
+                    new_issues = delta.get("code_issues") or []
+                    status = delta.get("status")
+
+                    # 仅中间步骤推送 step 事件(终态 delta 携带的是全量快照)
+                    if new_steps and not status:
+                        s = new_steps[-1]
+                        yield f"data: {json.dumps({'type': 'step', 'step': s.get('step'), 'action': s.get('action'), 'target': s.get('target'), 'result': s.get('result'), 'success': s.get('success'), 'console_errors': s.get('console_errors', []), 'network_errors': s.get('network_errors', [])}, ensure_ascii=False)}\n\n"
+
+                    # 错误分析出新的代码问题(非终态快照)
+                    if new_issues and not status:
+                        yield f"data: {json.dumps({'type': 'code_issue', 'issue': new_issues[-1], 'total': len(new_issues)}, ensure_ascii=False)}\n\n"
+
+                    if status == "cancelled":
+                        yield f"data: {json.dumps({'type': 'cancelled', 'message': delta.get('message', '测试已停止'), 'total_steps': len(new_steps), 'code_issues': new_issues, 'script_path': delta.get('script_path') or '', 'report_path': delta.get('report_path') or ''}, ensure_ascii=False)}\n\n"
+                    elif status == "failed":
+                        yield f"data: {json.dumps({'type': 'error', 'message': delta.get('message', '测试执行失败'), 'total_steps': len(new_steps), 'code_issues': new_issues}, ensure_ascii=False)}\n\n"
+                    elif status in ("completed", "awaiting_fix"):
+                        yield f"data: {json.dumps({'type': 'done', 'status': status, 'message': delta.get('message', ''), 'total_steps': len(new_steps), 'code_issues': new_issues, 'script_path': delta.get('script_path') or '', 'report_path': delta.get('report_path') or ''}, ensure_ascii=False)}\n\n"
+
+            yield "data: [DONE]\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+        finally:
+            active_runs.discard(task_id)
+
+    return StreamingResponse(_event_generator(), media_type="text/event-stream")
 
 
 def register_routes(app):
@@ -291,7 +398,7 @@ def register_routes(app):
             "id": mc.id,
             "platform": mc.platform,
             "platform_name": _PLATFORM_INFO.get(mc.platform, {}).get("name", mc.platform),
-            "api_key": mc.api_key,
+            "api_key_masked": _mask_api_key(mc.api_key),
             "api_base_url": mc.api_base_url,
             "model_name": mc.model_name,
             "is_active": bool(mc.is_active),
@@ -310,7 +417,8 @@ def register_routes(app):
         if not mc:
             raise HTTPException(status_code=404, detail="模型配置不存在")
 
-        if request.api_key is not None:
+        # 忽略脱敏回显值(含 **** 的字符串不是有效密钥),只接受用户新输入的明文 Key
+        if request.api_key and "****" not in request.api_key:
             mc.api_key = request.api_key
         if request.api_base_url is not None:
             mc.api_base_url = request.api_base_url
@@ -401,11 +509,13 @@ def register_routes(app):
         return {"message": "已取消选择模型"}
 
     @app.post("/settings/ai/test", response_model=TestAIResponse)
-    async def test_ai_connection(request: TestAIRequest):
-        """测试 AI 连接是否正常"""
+    async def test_ai_connection(
+        request: TestAIRequest,
+        current_user: User = Depends(get_current_user),
+    ):
+        """测试 AI 连接是否正常(需登录,防止未鉴权端点被用作内网探针)"""
         try:
-            from openai import OpenAI
-            client = OpenAI(api_key=request.api_key, base_url=request.api_base_url)
+            client = build_plain_client({"api_key": request.api_key, "api_base_url": request.api_base_url})
             client.chat.completions.create(
                 model=request.chat_model,
                 messages=[{"role": "user", "content": "Hi"}],
@@ -466,6 +576,94 @@ def register_routes(app):
         db.delete(conv)
         db.commit()
         return {"message": "对话记录已删除"}
+
+    # ==================== 智能分析接口（Bug分析 / 测试用例 / 代码审查） ====================
+
+    def _save_module_conversation(db: Session, user_id: int, session_id, module: str, input_text: str, data: dict):
+        """按模块保存分析类对话记录(未提供会话时不落库)"""
+        if not session_id:
+            return
+        conversation = Conversation(
+            user_id=user_id,
+            session_id=session_id,
+            module=module,
+            input_text=input_text,
+            output_data=json.dumps(data, ensure_ascii=False),
+        )
+        db.add(conversation)
+        _update_session_name(db, session_id, input_text)
+        db.commit()
+
+    @app.post("/analysis/bug", response_model=CodeAnalysisResponse, summary="Bug 枚举分析")
+    async def bug_analysis(
+        request: CodeAnalysisRequest,
+        db: Session = Depends(get_db),
+        current_user: User = Depends(get_current_user),
+    ):
+        """对代码或问题描述做 Bug类型/严重程度/影响范围 三维度分析"""
+        ai_config = _get_user_ai_config(current_user.id, db)
+        try:
+            result = await asyncio.to_thread(analyze_bug, request.code, ai_config)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        _save_module_conversation(db, current_user.id, request.session_id, "code", request.code, result)
+        return CodeAnalysisResponse(
+            intent="code",
+            confidence=result.get("bug_type_confidence", 0.0),
+            module="code",
+            data=result,
+            message="Bug分析完成",
+            session_id=request.session_id or "",
+        )
+
+    @app.post("/analysis/cases", response_model=TestCaseResponse, summary="测试用例生成")
+    async def generate_cases(
+        request: TestCaseRequest,
+        db: Session = Depends(get_db),
+        current_user: User = Depends(get_current_user),
+    ):
+        """根据功能描述生成测试用例(正常/异常/边界/安全场景)"""
+        ai_config = _get_user_ai_config(current_user.id, db)
+        try:
+            result = await asyncio.to_thread(
+                generate_test_cases, request.feature_description, ai_config, current_user.id
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        _save_module_conversation(db, current_user.id, request.session_id, "case", request.feature_description, result)
+        return TestCaseResponse(
+            intent="case",
+            confidence=1.0 if result.get("cases") else 0.0,
+            module="case",
+            data=result,
+            message="测试用例生成完成",
+            session_id=request.session_id or "",
+        )
+
+    @app.post("/analysis/code", response_model=CodeAnalysisResponse, summary="代码审查")
+    async def code_review(
+        request: CodeAnalysisRequest,
+        db: Session = Depends(get_db),
+        current_user: User = Depends(get_current_user),
+    ):
+        """代码审查:功能/安全/性能/质量 四维度问题清单"""
+        ai_config = _get_user_ai_config(current_user.id, db)
+        try:
+            result = await asyncio.to_thread(review_code, request.code, ai_config)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        _save_module_conversation(db, current_user.id, request.session_id, "code", request.code, result)
+        return CodeAnalysisResponse(
+            intent="code",
+            confidence=1.0 if result.get("issues") is not None else 0.0,
+            module="code",
+            data=result,
+            message="代码审查完成",
+            session_id=request.session_id or "",
+        )
 
     # ==================== 文件管理接口 ====================
 
@@ -609,6 +807,18 @@ def register_routes(app):
     PROJECT_FOLDERS_DIR = Path(__file__).parent.parent / "project_uploads"
     PROJECT_FOLDERS_DIR.mkdir(exist_ok=True)
 
+    def _is_allowed_project_path(path: str) -> bool:
+        """项目路径只允许位于托管项目目录或默认 test_project 目录内，防任意目录遍历"""
+        candidate = os.path.abspath(path)
+        roots = [
+            str(PROJECT_FOLDERS_DIR.resolve()),
+            str((Path(__file__).parent.parent / "test_project").resolve()),
+        ]
+        return any(
+            candidate == root or candidate.startswith(root.rstrip(os.sep) + os.sep)
+            for root in roots
+        )
+
     @app.get("/projects", response_model=ProjectFolderListResponse, summary="获取项目文件夹列表")
     async def list_project_folders(
         current_user: User = Depends(get_current_user),
@@ -698,8 +908,14 @@ def register_routes(app):
             with open(temp_zip, "wb") as f:
                 f.write(zip_content)
 
-            # 解压
+            # 解压（防 zip-slip:拒绝路径逃逸出项目目录的条目）
             with zipfile.ZipFile(temp_zip, 'r') as zf:
+                folder_root = str(folder_path.resolve()) + os.sep
+                for member in zf.namelist():
+                    member_path = os.path.normpath(os.path.join(str(folder_path), member))
+                    if not member_path.startswith(folder_root):
+                        temp_zip.unlink(missing_ok=True)
+                        raise HTTPException(status_code=400, detail=f"ZIP 包含非法路径条目: {member}")
                 zf.extractall(folder_path)
 
             # 删除临时文件
@@ -879,23 +1095,17 @@ def register_routes(app):
     async def get_knowledge_list(
         current_user: User = Depends(get_current_user),
     ):
-        """获取当前用户的所有知识文档"""
-        from app.vector_db import vector_db
-        collection = vector_db._get_collection(current_user.id)
-        count = collection.count()
-        if count == 0:
-            return {"knowledge": [], "total": 0}
-
-        # 获取所有文档
-        results = collection.get()
-        knowledge = []
-        for i, doc_id in enumerate(results["ids"]):
-            knowledge.append({
-                "doc_id": doc_id,
-                "content": results["documents"][i],
-                "metadata": results["metadatas"][i] if results["metadatas"] else {},
-                "created_at": datetime.now().isoformat(),
-            })
+        """获取当前用户的所有知识文档（按父文档聚合分块）"""
+        documents = vector_db.list_documents(current_user.id)
+        knowledge = [
+            {
+                "doc_id": d["doc_id"],
+                "content": d["content"],
+                "metadata": d["metadata"],
+                "chunk_count": d["chunk_count"],
+            }
+            for d in documents
+        ]
         return {"knowledge": knowledge, "total": len(knowledge)}
 
     @app.post("/knowledge/add", summary="添加知识文档")
@@ -926,19 +1136,11 @@ def register_routes(app):
         request: AddKnowledgeRequest,
         current_user: User = Depends(get_current_user),
     ):
-        """更新知识文档内容（先删除旧的，再添加新的）"""
-        from app.vector_db import vector_db
-        # 先删除旧的
+        """更新知识文档内容（先删除旧的全部分块，再按新内容重新分块入库）"""
         vector_db.delete_document(doc_id, current_user.id)
-        # 再添加新的（保留原 doc_id）
-        collection = vector_db._get_collection(current_user.id)
         metadata = request.metadata or {"updated": "true"}
-        collection.add(
-            documents=[request.content],
-            ids=[doc_id],
-            metadatas=[metadata]
-        )
-        return {"doc_id": doc_id, "message": "更新成功"}
+        new_doc_id = vector_db.add_document(request.content, current_user.id, metadata)
+        return {"doc_id": new_doc_id, "message": "更新成功"}
 
     # ==================== 统一对话接口（SSE 流式） ====================
 
@@ -950,7 +1152,6 @@ def register_routes(app):
     ):
         """流式统一对话接口：SSE 实时推送 AI 回答，支持 RAG 知识库问答"""
         import asyncio
-        from openai import OpenAI
 
         session_id = request.session_id
         file_id = request.file_id
@@ -1007,8 +1208,6 @@ def register_routes(app):
         confidence = intent_result["confidence"]
 
         if intent == "web_test":
-            from app.test_engine import run_test_task
-
             url_match = re.search(r'https?://[^\s]+', effective_content)
             test_url = url_match.group(0) if url_match else None
             if not test_url and request.browser_url:
@@ -1020,70 +1219,68 @@ def register_routes(app):
                 return StreamingResponse(_no_url_generator(), media_type="text/event-stream")
 
             project_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "test_project")
-            queue: asyncio.Queue = asyncio.Queue()
-            stop_event = asyncio.Event()
-            test_task_id = None
+            task_id = uuid.uuid4().hex[:16]
+            task_state = new_task_state(
+                task_id=task_id,
+                user_id=current_user.id,
+                target_url=test_url,
+                project_path=project_path,
+                test_goals=[effective_content],
+                ai_config=ai_config,
+                max_steps=20,
+                use_vision=_resolve_use_vision(request.use_vision),
+                storage_state=request.storage_state or "",
+            )
+            return _test_sse_response(task_state, task_id, start_payload={"url": test_url, "message": f"开始测试 {test_url}"})
 
-            async def on_step(step_data):
-                await queue.put(step_data)
+        # code / case / knowledge 意图:同步分析类功能,使用原始输入
+        # (不注入 RAG 上下文,避免参考知识污染分析与入库内容)
+        if intent in ("code", "case", "knowledge"):
+            async def _analysis_generator():
+                try:
+                    yield f"data: {json.dumps({'type': 'meta', 'intent': intent, 'confidence': confidence, 'session_id': session_id}, ensure_ascii=False)}\n\n"
 
-            async def _event_generator():
-                nonlocal test_task_id
-
-                async def _run():
-                    nonlocal test_task_id
-                    try:
-                        result = await run_test_task(
-                            target_url=test_url,
-                            project_path=project_path,
-                            test_goals=[effective_content],
-                            ai_config=ai_config,
-                            max_steps=20,
-                            on_step=on_step,
-                            stop_event=stop_event,
+                    if intent == "code":
+                        data = await asyncio.to_thread(analyze_bug, request.content, ai_config)
+                        result_message = "Bug分析完成"
+                    elif intent == "case":
+                        data = await asyncio.to_thread(
+                            generate_test_cases, request.content, ai_config, current_user.id
                         )
-                        test_task_id = result.get("task_id")
-                        status = result.get("status", "completed")
-                        if status == "cancelled":
-                            await queue.put({
-                                "type": "cancelled",
-                                "message": result.get("message", "测试已停止"),
-                                "total_steps": len(result.get("steps", [])),
-                                "code_issues": result.get("code_issues", []),
-                            })
-                        else:
-                            await queue.put({
-                                "type": "done",
-                                "status": status,
-                                "message": result.get("message", "测试完成"),
-                                "total_steps": len(result.get("steps", [])),
-                                "code_issues": result.get("code_issues", []),
-                            })
-                    except Exception as e:
-                        await queue.put({"type": "error", "message": str(e)})
-                    finally:
-                        await queue.put(None)
+                        result_message = "测试用例生成完成"
+                    else:
+                        knowledge_content = _extract_knowledge_content(request.content)
+                        doc_id = vector_db.add_document(knowledge_content, current_user.id, {"source": "chat"})
+                        data = {
+                            "doc_id": doc_id,
+                            "content": knowledge_content,
+                            "chunk_count": len(chunk_text(knowledge_content)),
+                        }
+                        result_message = "知识已添加到知识库"
 
-                task = asyncio.create_task(_run())
-                while test_task_id is None:
-                    await asyncio.sleep(0.05)
-                    if task.done():
-                        break
+                    conversation = Conversation(
+                        user_id=current_user.id,
+                        session_id=session_id,
+                        module=intent,
+                        input_text=request.content,
+                        output_data=json.dumps(data, ensure_ascii=False),
+                    )
+                    db.add(conversation)
+                    _update_session_name(db, session_id, request.content)
+                    db.commit()
 
-                yield f"data: {json.dumps({'type': 'start', 'url': test_url, 'message': f'开始测试 {test_url}', 'task_id': test_task_id}, ensure_ascii=False)}\n\n"
-
-                while True:
-                    event = await queue.get()
-                    if event is None:
-                        break
-                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-
+                    yield f"data: {json.dumps({'type': 'result', 'module': intent, 'data': data, 'message': result_message}, ensure_ascii=False)}\n\n"
+                    yield f"data: {json.dumps({'type': 'done', 'data': data, 'message': result_message, 'conv_id': conversation.id}, ensure_ascii=False)}\n\n"
+                except ValueError as e:
+                    yield f"data: {json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
+                except Exception as e:
+                    yield f"data: {json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
                 yield "data: [DONE]\n\n"
 
-            return StreamingResponse(_event_generator(), media_type="text/event-stream")
+            return StreamingResponse(_analysis_generator(), media_type="text/event-stream")
 
         # 普通对话：流式调用 LLM
-        client = OpenAI(api_key=ai_config["api_key"], base_url=ai_config.get("api_base_url", "https://api.openai.com/v1"))
+        client = build_plain_client(ai_config)
 
         async def _stream_generator():
             full_text = ""
@@ -1202,14 +1399,17 @@ def register_routes(app):
         db: Session = Depends(get_db),
         current_user: User = Depends(get_current_user),
     ):
-        """执行Web自动化测试任务"""
+        """执行Web自动化测试任务(LangGraph 状态机,每步持久化到检查点)"""
+        if not _is_allowed_project_path(request.project_path):
+            raise HTTPException(status_code=403, detail="项目路径不在允许的目录内")
+
         user_ai_config = db.query(ModelConfig).filter(
             ModelConfig.user_id == current_user.id,
             ModelConfig.is_active == True
         ).first()
 
         if not user_ai_config:
-            return {"error": "请先在AI模型配置页面添加并启用一个AI模型"}
+            raise HTTPException(status_code=400, detail="请先在AI模型配置页面添加并启用一个AI模型")
 
         ai_config = {
             "api_key": user_ai_config.api_key,
@@ -1217,48 +1417,26 @@ def register_routes(app):
             "chat_model": user_ai_config.model_name,
         }
 
-        import asyncio
-        from app.test_engine import run_test_task as engine_run_task
-
-        task_result = await engine_run_task(
+        graph = await test_agent_manager.get_graph()
+        task_id = uuid.uuid4().hex[:16]
+        task_state = new_task_state(
+            task_id=task_id,
+            user_id=current_user.id,
             target_url=request.target_url,
             project_path=request.project_path,
             test_goals=request.test_goals,
             ai_config=ai_config,
             max_steps=request.max_steps,
+            use_vision=_resolve_use_vision(request.use_vision),
+            storage_state=request.storage_state or "",
         )
 
-        if "error" in task_result:
-            raise HTTPException(status_code=400, detail=task_result["error"])
+        final_state = await graph.ainvoke(task_state, config=make_config(task_id))
 
-        steps = []
-        for s in task_result.get("steps", []):
-            steps.append(TestStep(**s))
+        if final_state.get("status") == "failed":
+            raise HTTPException(status_code=400, detail=final_state.get("message", "测试执行失败"))
 
-        code_issues = []
-        for ci in task_result.get("code_issues", []):
-            code_issues.append(CodeIssue(**ci))
-
-        errors_count = sum(
-            1 for s in task_result["steps"]
-            if s.get("console_errors") or s.get("network_errors") or not s.get("success")
-        )
-
-        screenshots_count = sum(
-            1 for s in task_result["steps"]
-            if s.get("screenshot")
-        )
-
-        return TestTaskResponse(
-            task_id=task_result["task_id"],
-            target_url=task_result["target_url"],
-            status=task_result["status"],
-            steps=steps,
-            errors_found=errors_count,
-            screenshots_saved=screenshots_count,
-            code_issues=code_issues,
-            message=task_result.get("message", ""),
-        )
+        return _state_to_response(task_id, final_state)
 
     @app.post("/test/code/fix", summary="确认代码修复")
     async def confirm_code_fix(
@@ -1266,42 +1444,38 @@ def register_routes(app):
         db: Session = Depends(get_db),
         current_user: User = Depends(get_current_user),
     ):
-        """用户确认是否修改代码"""
-        from app.test_engine import running_test_tasks
-        from app.code_analyzer import analyze_and_fix_code
+        """用户确认是否修改代码:恢复停在 interrupt 的任务,按顺序应用或跳过当前问题"""
+        graph = await test_agent_manager.get_graph()
+        config = make_config(request.task_id)
+        snapshot = await graph.aget_state(config)
 
-        task_data = running_test_tasks.get(request.task_id)
-        if not task_data:
+        if not snapshot or not snapshot.values:
+            raise HTTPException(status_code=404, detail="测试任务不存在")
+        values = snapshot.values
+        if values.get("user_id") != current_user.id:
             raise HTTPException(status_code=404, detail="测试任务不存在")
 
-        user_ai_config = db.query(ModelConfig).filter(
-            ModelConfig.user_id == current_user.id,
-            ModelConfig.is_active == True
-        ).first()
+        if values.get("status") != "awaiting_fix":
+            raise HTTPException(status_code=400, detail="当前没有待确认的代码问题")
 
-        if not user_ai_config:
-            raise HTTPException(status_code=400, detail="未配置AI模型")
+        cursor = values.get("fix_cursor", 0)
+        issues = values.get("code_issues", [])
+        if request.issue_index != cursor or cursor >= len(issues):
+            raise HTTPException(status_code=400, detail=f"请按顺序确认代码问题，当前待确认为第 {cursor} 个")
 
-        ai_config = {
-            "api_key": user_ai_config.api_key,
-            "api_base_url": user_ai_config.api_base_url or "https://api.openai.com/v1",
-            "chat_model": user_ai_config.model_name,
-        }
+        # 恢复执行:应用本次确认后,若还有剩余问题会再次停在 interrupt
+        async for _chunk in graph.astream(
+            Command(resume={"confirmed": request.confirmed}),
+            config=config,
+            stream_mode="updates",
+        ):
+            pass
 
-        issues = task_data.get("code_issues", [])
-        if request.issue_index >= len(issues):
-            raise HTTPException(status_code=404, detail="问题索引不存在")
-
-        issue = issues[request.issue_index]
-
-        fix_result = analyze_and_fix_code(
-            file_path=issue["file_path"],
-            line_number=issue.get("line_number", 0),
-            error_log=issue.get("error_log", ""),
-            issue_description=issue.get("issue_description", ""),
-            suggested_fix=issue.get("suggested_fix", ""),
-            ai_config=ai_config,
-            auto_fix=request.confirmed,
+        snapshot = await graph.aget_state(config)
+        fix_results = snapshot.values.get("fix_results", []) if snapshot and snapshot.values else []
+        fix_result = next(
+            (fr for fr in fix_results if fr.get("issue_index") == request.issue_index),
+            {},
         )
 
         return {
@@ -1317,34 +1491,28 @@ def register_routes(app):
         db: Session = Depends(get_db),
         current_user: User = Depends(get_current_user),
     ):
-        """查询测试任务当前状态"""
-        from app.test_engine import running_test_tasks
+        """查询测试任务当前状态(从 SQLite 检查点读取,服务重启后仍可查询)"""
+        graph = await test_agent_manager.get_graph()
+        config = make_config(task_id)
+        snapshot = await graph.aget_state(config)
 
-        task_data = running_test_tasks.get(task_id)
-        if not task_data:
+        if not snapshot or not snapshot.values:
             raise HTTPException(status_code=404, detail="测试任务不存在")
 
-        steps = []
-        for s in task_data.get("steps", []):
-            steps.append(TestStep(**s))
+        values = dict(snapshot.values)
+        if values.get("user_id") != current_user.id:
+            raise HTTPException(status_code=404, detail="测试任务不存在")
 
-        code_issues = []
-        for ci in task_data.get("code_issues", []):
-            code_issues.append(CodeIssue(**ci))
+        status = values.get("status", "running")
+        message = values.get("message", "")
 
-        return TestTaskResponse(
-            task_id=task_data["task_id"],
-            target_url=task_data.get("target_url", ""),
-            status=task_data["status"],
-            steps=steps,
-            errors_found=sum(
-                1 for s in task_data["steps"]
-                if s.get("console_errors") or s.get("network_errors") or not s.get("success")
-            ),
-            screenshots_saved=sum(1 for s in task_data["steps"] if s.get("screenshot")),
-            code_issues=code_issues,
-            message=task_data.get("message", ""),
-        )
+        if status == "running" and task_id not in active_runs:
+            status = "interrupted"
+            message = "任务因服务重启或连接中断而暂停，可通过 POST /test/resume/{task_id} 从最后一步恢复"
+        elif status == "awaiting_fix":
+            message = message or "存在待确认的代码问题，请通过 POST /test/code/fix 逐个确认"
+
+        return _state_to_response(task_id, {**values, "status": status, "message": message})
 
     @app.get("/test/project/files", summary="获取项目文件列表")
     async def get_project_files(
@@ -1357,6 +1525,9 @@ def register_routes(app):
 
         if not os.path.isdir(project_path):
             raise HTTPException(status_code=400, detail="项目路径不存在")
+
+        if not _is_allowed_project_path(project_path):
+            raise HTTPException(status_code=403, detail="项目路径不在允许的目录内")
 
         files = []
         for root, dirs, filenames in os.walk(project_path):
@@ -1379,10 +1550,7 @@ def register_routes(app):
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db),
     ):
-        """SSE 流式测试接口：实时推送每个测试步骤"""
-        from app.test_engine import run_test_task
-        import asyncio
-
+        """SSE 流式测试接口：实时推送每个测试步骤(任务状态持久化到检查点)"""
         ai_config = _get_user_ai_config(current_user.id, db)
 
         # 提取 URL：优先从内容中提取，其次使用浏览器面板当前URL
@@ -1399,92 +1567,77 @@ def register_routes(app):
 
         project_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "test_project")
 
-        # 使用 Queue 在回调和生成器之间传递事件
-        queue: asyncio.Queue = asyncio.Queue()
-        stop_event = asyncio.Event()
+        task_id = uuid.uuid4().hex[:16]
+        task_state = new_task_state(
+            task_id=task_id,
+            user_id=current_user.id,
+            target_url=test_url,
+            project_path=project_path,
+            test_goals=[request.content],
+            ai_config=ai_config,
+            max_steps=20,
+            use_vision=_resolve_use_vision(request.use_vision),
+            storage_state=request.storage_state or "",
+        )
+        return _test_sse_response(task_state, task_id, start_payload={"url": test_url, "message": f"开始测试 {test_url}"})
 
-        async def on_step(step_data):
-            await queue.put(step_data)
+    @app.post("/test/resume/{task_id}", summary="恢复中断的测试任务（SSE）")
+    async def resume_test(
+        task_id: str,
+        current_user: User = Depends(get_current_user),
+    ):
+        """从最后一个检查点恢复测试任务(服务重启或连接中断后可用)"""
+        graph = await test_agent_manager.get_graph()
+        snapshot = await graph.aget_state(make_config(task_id))
 
-        # 预先生成 task_id，前端可通过 start 事件获取
-        test_task_id = None
+        if not snapshot or not snapshot.values:
+            raise HTTPException(status_code=404, detail="测试任务不存在")
+        values = snapshot.values
+        if values.get("user_id") != current_user.id:
+            raise HTTPException(status_code=404, detail="测试任务不存在")
+        if values.get("status") == "awaiting_fix":
+            raise HTTPException(status_code=400, detail="任务正在等待修复确认，请调用 /test/code/fix")
+        if values.get("status") in ("completed", "cancelled", "failed"):
+            raise HTTPException(status_code=400, detail="任务已结束，无法恢复")
 
-        async def _event_generator():
-            nonlocal test_task_id
-
-            # 在后台运行测试任务
-            async def _run():
-                nonlocal test_task_id
-                try:
-                    result = await run_test_task(
-                        target_url=test_url,
-                        project_path=project_path,
-                        test_goals=[request.content],
-                        ai_config=ai_config,
-                        max_steps=20,
-                        on_step=on_step,
-                        stop_event=stop_event,
-                    )
-                    test_task_id = result.get("task_id")
-                    status = result.get("status", "completed")
-                    if status == "cancelled":
-                        await queue.put({
-                            "type": "cancelled",
-                            "message": result.get("message", "测试已停止"),
-                            "total_steps": len(result.get("steps", [])),
-                            "code_issues": result.get("code_issues", []),
-                        })
-                    else:
-                        await queue.put({
-                            "type": "done",
-                            "status": status,
-                            "message": result.get("message", "测试完成"),
-                            "total_steps": len(result.get("steps", [])),
-                            "code_issues": result.get("code_issues", []),
-                        })
-                except Exception as e:
-                    await queue.put({"type": "error", "message": str(e)})
-                finally:
-                    await queue.put(None)  # 结束信号
-
-            task = asyncio.create_task(_run())
-
-            # 等待 task_id 生成后推送开始事件
-            while test_task_id is None:
-                await asyncio.sleep(0.05)
-                if task.done():
-                    break
-
-            # 推送开始事件（包含 task_id 以便前端停止测试）
-            yield f"data: {json.dumps({'type': 'start', 'url': test_url, 'message': f'开始测试 {test_url}', 'task_id': test_task_id}, ensure_ascii=False)}\n\n"
-
-            # 从队列读取事件并推送
-            while True:
-                event = await queue.get()
-                if event is None:
-                    break
-                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-
-            yield "data: [DONE]\n\n"
-
-        return StreamingResponse(_event_generator(), media_type="text/event-stream")
+        return _test_sse_response(None, task_id)
 
     @app.post("/test/stop/{task_id}", summary="停止正在运行的测试任务")
     async def stop_test(
         task_id: str,
         current_user: User = Depends(get_current_user),
     ):
-        """停止指定测试任务"""
-        from app.test_engine import running_test_tasks
+        """停止指定测试任务(运行中的任务在下一个步骤边界生效)"""
+        graph = await test_agent_manager.get_graph()
+        config = make_config(task_id)
+        snapshot = await graph.aget_state(config)
 
-        task = running_test_tasks.get(task_id)
-        if not task:
+        if not snapshot or not snapshot.values:
+            return {"success": False, "message": "测试任务不存在或已结束"}
+        values = snapshot.values
+        if values.get("user_id") != current_user.id:
             return {"success": False, "message": "测试任务不存在或已结束"}
 
-        # 触发停止事件
-        stop_event = task.get("stop_event")
-        if stop_event:
-            stop_event.set()
-            task["status"] = "stopping"
+        status = values.get("status", "running")
 
-        return {"success": True, "message": "已发送停止信号"}
+        if task_id in active_runs:
+            # 协作式停止:测试步骤之间检查标志,经 finalize 完成浏览器清理
+            stop_requested.add(task_id)
+            return {"success": True, "message": "已发送停止信号"}
+
+        if status == "awaiting_fix":
+            # 停在人工确认:跳过剩余确认后标记为已停止
+            remaining = len(values.get("code_issues", [])) - values.get("fix_cursor", 0)
+            for _ in range(max(remaining, 0)):
+                async for _chunk in graph.astream(
+                    Command(resume={"confirmed": False}), config=config, stream_mode="updates"
+                ):
+                    pass
+            await graph.aupdate_state(config, {"status": "cancelled", "message": "测试已停止"})
+            return {"success": True, "message": "已停止并跳过剩余修复确认"}
+
+        if status in ("running", "interrupted"):
+            await graph.aupdate_state(config, {"status": "cancelled", "message": "测试已停止"})
+            return {"success": True, "message": "已发送停止信号"}
+
+        return {"success": False, "message": "测试任务不存在或已结束"}

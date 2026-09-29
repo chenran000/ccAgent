@@ -1,46 +1,5 @@
 """意图识别分类器 - 自动判断用户意图并路由到对应功能"""
-import json
 import re
-import openai
-from app.prompts import INTENT_CLASSIFICATION_PROMPT, INTENT_TYPES
-
-
-def classify_intent(content: str, ai_config: dict = None) -> dict:
-    """
-    对用户输入进行意图分类，判断应该调用哪个功能模块
-
-    Args:
-        content: 用户输入文本
-        ai_config: 用户 AI 配置 {api_key, api_base_url, chat_model}
-    """
-    if not ai_config or not ai_config.get("api_key"):
-        raise ValueError("请在模型管理中配置 AI 模型")
-
-    client = openai.OpenAI(
-        api_key=ai_config["api_key"],
-        base_url=ai_config["api_base_url"]
-    )
-
-    response = client.chat.completions.create(
-        model=ai_config["chat_model"],
-        messages=[
-            {"role": "system", "content": INTENT_CLASSIFICATION_PROMPT},
-            {"role": "user", "content": f"请对以下用户输入进行意图分类：\n\n{content}"}
-        ],
-        temperature=0.1,
-    )
-
-    result_text = response.choices[0].message.content.strip()
-    result_text = _clean_json_output(result_text)
-    result = _parse_json_safely(result_text)
-
-    intent = _validate_intent(result.get("intent", "chat"))
-    confidence = result.get("confidence", 0.0)
-
-    return {
-        "intent": intent,
-        "confidence": confidence
-    }
 
 
 def classify_intent_local(content: str) -> dict:
@@ -106,35 +65,3 @@ def classify_intent_local(content: str) -> dict:
     else:
         # 默认闲聊或无法判断
         return {"intent": "chat", "confidence": 0.5}
-
-
-def _clean_json_output(text: str) -> str:
-    """清理 AI 返回结果中的代码块标记"""
-    if text.startswith("```json"):
-        text = text[7:]
-    if text.startswith("```"):
-        text = text[3:]
-    if text.endswith("```"):
-        text = text[:-3]
-    return text.strip()
-
-
-def _parse_json_safely(text: str) -> dict:
-    """安全地解析 JSON，支持容错处理"""
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        json_match = re.search(r'\{[\s\S]*\}', text)
-        if json_match:
-            try:
-                return json.loads(json_match.group())
-            except Exception:
-                pass
-        return {"intent": "chat", "confidence": 0.0}
-
-
-def _validate_intent(intent: str) -> str:
-    """校验意图类型是否在预定义枚举内"""
-    if intent not in INTENT_TYPES:
-        return "chat"
-    return intent

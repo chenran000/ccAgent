@@ -90,20 +90,6 @@ class FileInfo(BaseModel):
     created_at: str
     extracted_text_preview: str
 
-class FileUploadResponse(BaseModel):
-    """文件上传响应"""
-    id: int
-    original_filename: str
-    file_type: str
-    file_size: int
-    message: str
-
-class FileReadResponse(BaseModel):
-    """文件读取响应"""
-    id: int
-    original_filename: str
-    extracted_text: str
-
 # 知识库相关模型
 class KnowledgeDoc(BaseModel):
     id: str
@@ -114,17 +100,6 @@ class AddKnowledgeRequest(BaseModel):
     content: str
     metadata: dict = {}
 
-class SearchRequest(BaseModel):
-    query: str
-    top_k: int = 3
-
-class SearchResponse(BaseModel):
-    results: List[dict]
-
-class KnowledgeStatsResponse(BaseModel):
-    total_docs: int
-    index_ready: bool
-
 # ========== 统一对话入口相关模型 ==========
 
 class ChatRequest(BaseModel):
@@ -133,18 +108,8 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None
     file_id: Optional[int] = None
     browser_url: Optional[str] = None  # 浏览器面板当前打开的URL
-
-class IntentResult(BaseModel):
-    intent: str           # code / case / knowledge / chat
-    confidence: float
-
-class ChatResponse(BaseModel):
-    intent: str           # 识别的意图
-    confidence: float     # 意图识别置信度
-    module: str           # 实际处理的模块 (code/case/knowledge/chat)
-    data: dict            # 模块返回的结果数据
-    message: str          # 用户友好的提示信息
-    session_id: str = ""  # 会话ID
+    use_vision: Optional[bool] = None  # 视觉感知开关（None 跟随全局 TEST_AGENT_VISION 配置）
+    storage_state: Optional[str] = None  # 登录态档案名（首次执行保存，后续复用免登录）
 
 # ========== AI 模型管理相关模型 ==========
 
@@ -165,11 +130,6 @@ class ModelConfigInfo(BaseModel):
     model_name: str
     is_active: bool
     created_at: str
-
-class ModelGroup(BaseModel):
-    """模型分组"""
-    label: str
-    models: List[ModelConfigInfo]
 
 class ModelListResponse(BaseModel):
     """模型列表响应"""
@@ -216,19 +176,25 @@ class TestTaskRequest(BaseModel):
     project_path: str  # 本地项目代码路径
     test_goals: List[str]  # 测试目标列表，如["测试登录功能", "测试搜索框"]
     max_steps: int = 30  # 最大测试步骤数
+    use_vision: Optional[bool] = None  # 视觉感知开关（None 跟随全局 TEST_AGENT_VISION 配置）
+    storage_state: Optional[str] = None  # 登录态档案名（首次执行保存，后续复用免登录）
 
 class TestRequest(BaseModel):
     """流式测试请求"""
     content: str  # 用户输入的测试描述，包含URL
     browser_url: Optional[str] = None  # 浏览器面板当前打开的URL
+    use_vision: Optional[bool] = None  # 视觉感知开关（None 跟随全局 TEST_AGENT_VISION 配置）
+    storage_state: Optional[str] = None  # 登录态档案名（首次执行保存，后续复用免登录）
 
 class TestStep(BaseModel):
     """测试步骤"""
     step: int
-    action: str  # click/type/wait/navigate/assert 等
+    action: str  # click/type/wait/navigate/assert/assert_text/assert_url/extract_value 等
     target: str  # 操作目标描述
     result: str  # 执行结果
     success: bool  # 该步骤是否成功
+    selector: str = ""  # 录制的稳定定位表达式(脚本回放用)
+    screenshot_path: str = ""  # 步骤截图相对路径(视觉模式落盘归档)
     screenshot: Optional[str] = None  # 截图(base64)
     console_errors: List[str] = []  # Console错误
     network_errors: List[str] = []  # Network错误
@@ -246,12 +212,14 @@ class TestTaskResponse(BaseModel):
     """测试任务响应"""
     task_id: str
     target_url: str
-    status: str  # running/completed/failed/waiting_confirm
+    status: str  # running/completed/failed/waiting_confirm/interrupted
     steps: List[TestStep]
     errors_found: int  # 发现的错误数
     screenshots_saved: int  # 保存的截图数
     code_issues: List[CodeIssue] = []  # 代码问题定位
     message: str
+    script_path: str = ""  # 回放脚本相对路径(相对被测项目目录)
+    report_path: str = ""  # 测试报告相对路径(相对被测项目目录)
 
 class CodeModifyRequest(BaseModel):
     """代码修改确认请求"""
