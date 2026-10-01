@@ -2,6 +2,7 @@
 import base64
 import os
 import re
+import sys
 from typing import List, Dict, Optional
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 
@@ -89,7 +90,11 @@ class BrowserCapture:
     async def start(self, storage_state_path: str = ""):
         """启动浏览器（提供已存在的 storage_state 文件时加载登录态）"""
         self.playwright = await async_playwright().start()
-        self.browser = await self.playwright.chromium.launch(headless=self.headless)
+        launch_kwargs: Dict = {"headless": self.headless}
+        if sys.platform.startswith("linux"):
+            # Linux/容器环境:root 运行必须 --no-sandbox,小 /dev/shm 需要 --disable-dev-shm-usage
+            launch_kwargs["args"] = ["--no-sandbox", "--disable-dev-shm-usage"]
+        self.browser = await self.playwright.chromium.launch(**launch_kwargs)
         context_kwargs: Dict = {"viewport": {"width": 1280, "height": 800}}
         if storage_state_path and os.path.exists(storage_state_path):
             context_kwargs["storage_state"] = storage_state_path

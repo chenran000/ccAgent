@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import List
 from fastapi import HTTPException, Depends, File, UploadFile, Form
 from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
 from app.database import get_db, init_db
@@ -151,6 +152,10 @@ def register_routes(app):
 
     # 前端静态文件路径
     frontend_dir = Path(__file__).parent.parent / "frontend"
+
+    # vite 构建产物静态资源(/assets/*);目录不存在(未执行 npm run build)时跳过
+    if (frontend_dir / "assets").is_dir():
+        app.mount("/assets", StaticFiles(directory=frontend_dir / "assets"), name="assets")
 
     # ==================== 认证接口 ====================
 

@@ -1,0 +1,25 @@
+services:
+  app:
+    build: .
+    image: testassistant-ai:latest
+    container_name: testassistant-ai
+    ports:
+      - "2222:2222"
+    environment:
+      # 同源部署 + 局域网访问场景,放开 CORS(生产请收敛为具体来源)
+      CORS_ORIGINS: "*"
+      TEST_AGENT_VISION: "false"
+    volumes:
+      - ./data:/app/data
+      - ./knowledge_base:/app/knowledge_base
+      - ./project_uploads:/app/project_uploads
+      - ./uploads:/app/uploads
+      - ./test_project:/app/test_project
+    shm_size: 2gb
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "-s", "http://localhost:2222/docs"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s

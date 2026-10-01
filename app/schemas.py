@@ -139,7 +139,8 @@ class ModelListResponse(BaseModel):
 
 class AddModelRequest(BaseModel):
     """添加模型配置请求"""
-    platform: str
+    # 前端保存时不传 platform;后端统一按"自定义"处理,故提供默认值
+    platform: str = "custom"
     api_key: str
     api_base_url: str
     model_name: str
