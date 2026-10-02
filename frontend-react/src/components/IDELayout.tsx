@@ -6,10 +6,8 @@ import ModelPanel from './ModelPanel';
 import Sidebar, { type MainView } from './Sidebar';
 import { createSession, deleteSession, getKnowledgeStats, listSessions, renameSession } from '../lib/api';
 import type { SessionInfo } from '../lib/types';
-import { useAuth } from '../context/AuthContext';
 
 export default function IDELayout() {
-  const { user } = useAuth();
   const [view, setView] = useState<MainView>('chat');
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string>(
@@ -124,7 +122,7 @@ export default function IDELayout() {
             />
           ) : (
             <div className="flex-1 flex items-center justify-center text-sm text-gray-400">
-              {user ? '正在准备会话...' : ''}
+              正在准备会话...
             </div>
           )}
         </div>

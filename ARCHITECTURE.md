@@ -1,10 +1,12 @@
-# TestAssistant AI — 架构文档
+# TestAssistant AI — 架构文档(testAExe 单用户本地版)
 
 ## 项目概述
 
-基于多平台大模型的**软件测试 AI Agent 平台**。核心是一个 LangGraph 状态机驱动的 Web 自动化测试 Agent(DOM 文本感知、确定性断言、检查点持久化、人工确认修复、探索产物沉淀),配合五类意图路由的统一对话入口、Instructor 结构化输出、分块/阈值/重排的 RAG 知识库,以及完整的 React 前端。
+基于多平台大模型的**软件测试 AI Agent 平台**。核心是一个 LangGraph 状态机驱动的 Web 自动化测试 Agent(DOM 文本感知、确定性断言、检查点持久化、人工确认修复、探索产物沉淀),配合五类意图路由的统一对话入口、Instructor 结构化输出、分块/阈值的 RAG 知识库,以及完整的 React 前端。
 
-数据按用户隔离:业务库、向量集合、上传目录、登录态、测试任务均绑定 user_id。
+**单用户本地版**(testAExe 分支):无注册/登录/用户系统(参考 ZCode 的本地单用户实践),所有数据归属内置 "local" 用户(启动时自动归并历史多用户数据);服务默认只绑 127.0.0.1;API Key 落盘前用 AES-256-GCM 加密(`enc:v1:` 前缀,密钥由机器信息派生,借鉴 ZCode credential-cipher);知识库 Embedding 走 OpenAI 兼容 API(移除本地 torch/bge 模型,镜像体积 -3GB+);浏览器默认无头(`TEST_AGENT_HEADLESS=false` 可观察)。多用户 Web 版保留在 featureGli 分支。
+
+数据按 user_id 隔离(单用户版恒为内置 "local" 用户):业务库、向量集合、上传目录、登录态、测试任务均绑定 user_id。
 
 ## 目录结构
 
@@ -16,10 +18,12 @@ ccAgent-featureGli/
 ├── ARCHITECTURE.md             # 本文档
 │
 ├── app/                        # 后端
-│   ├── config.py               # 配置:端口/JWT/CORS/路径/EMBEDDING_MODEL/RAG_*/TEST_AGENT_VISION
+│   ├── config.py               # 配置:HOST/CORS/EMBEDDING_API_*/RAG_*/TEST_AGENT_VISION/HEADLESS
 │   ├── database.py             # SQLAlchemy + SQLite(app.db)
 │   ├── models.py               # ORM:User/Session/Conversation/ModelConfig/UserActiveModel/Document/ProjectFolder
-│   ├── auth.py                 # JWT + bcrypt
+│   ├── auth.py                 # 本地用户依赖(单用户版,替代 JWT 鉴权)
+│   ├── credential_cipher.py    # API Key 加密(AES-256-GCM,机器派生密钥)
+│   ├── ai_config.py            # 按 model_config_id 现取 AI 配置(密钥不进检查点)
 │   ├── schemas.py              # Pydantic 请求/响应模型
 │   ├── routes.py               # 全部 HTTP/SSE 接口 + SSE 事件编排
 │   ├── llm.py                  # ★ 统一 LLM 客户端 + Instructor 结构化输出 + 9 个输出契约
@@ -31,7 +35,7 @@ ccAgent-featureGli/
 │   ├── code_analyzer.py        # AI 补丁生成 + 路径围栏写盘(.bak 备份)
 │   ├── script_generator.py     # ★ 轨迹 → 可回放 Playwright 脚本 + 结构化测试报告
 │   ├── analysis_service.py     # Bug枚举分析 / 测试用例生成 / 代码审查(含 RAG 知识检索)
-│   ├── vector_db.py            # ChromaDB + 中文分块/阈值过滤/CrossEncoder重排
+│   ├── vector_db.py            # ChromaDB + 中文分块/阈值过滤(Embedding 走 API)
 │   ├── file_parser.py          # PDF/TXT 文本提取
 │   ├── file_storage.py         # 上传文件存储
 │   └── file_viewer.py          # 文件预览(文本/图片/二进制识别)
@@ -45,8 +49,7 @@ ccAgent-featureGli/
 │
 ├── data/
 │   ├── app.db                  # 业务 SQLite
-│   ├── checkpoints.db          # LangGraph 任务检查点
-│   ├── .jwt_secret             # 自动生成的 JWT 密钥(未显式配置时)
+│   ├── checkpoints.db          # LangGraph 任务检查点(仅存 model_config_id 引用,无密钥)
 │   └── storage_states/{uid}/   # 登录态档案(storage_state)
 ├── knowledge_base/             # ChromaDB 持久化(按用户分集合)
 ├── project_uploads/{uid}/      # 用户上传的被测项目
@@ -73,8 +76,8 @@ ccAgent-featureGli/
 ├────────────────────────────────────────────────────────────────┤
 │ 存储层  app.db + checkpoints.db + ChromaDB + storage_states    │
 ├────────────────────────────────────────────────────────────────┤
-│ 安全    JWT自动密钥/路径围栏/Key掩码/zip-slip防护/项目路径白名单 │
-│ 观测    Langfuse 可选全链路追踪(LANGFUSE_* 三项配置即启用)     │
+│ 安全    凭据加密(AES-GCM)/路径围栏/Key掩码/zip-slip防护/项目路径白名单 │
+│ 观测    结构化 logging(凭据不落日志)                            │
 └────────────────────────────────────────────────────────────────┘
 ```
 
@@ -157,16 +160,16 @@ await_fix:interrupt() 暂停 → /test/code/fix 逐个确认 → AI 补丁自动
 
 | 分组 | 接口 |
 |---|---|
-| 认证 | POST /auth/register · POST /auth/login · GET /auth/me |
+| 认证 | (单用户本地版无认证接口;多用户版见 featureGli 分支) |
 | 会话 | GET/POST /sessions · PUT/DELETE /sessions/{id} |
-| 模型 | GET /settings/models · GET /settings/platforms · POST /settings/models · GET/PUT/DELETE /settings/models/{id} · GET /settings/active · POST /settings/active/{id} · DELETE /settings/active · POST /settings/ai/test(需鉴权) |
+| 模型 | GET /settings/models · GET /settings/platforms · POST /settings/models · GET/PUT/DELETE /settings/models/{id} · GET /settings/active · POST /settings/active/{id} · DELETE /settings/active · POST /settings/ai/test |
 | 历史 | GET /conversations(分页/按会话) · DELETE /conversations/{id} |
 | 智能分析 | POST /analysis/bug · POST /analysis/cases · POST /analysis/code |
 | 文件 | POST /files/upload · GET /files · GET/DELETE /files/{id} |
 | 项目 | GET/POST /projects · POST /projects/upload(ZIP,防 zip-slip) · DELETE /projects/{id} · GET /projects/{id}/files · GET /projects/{id}/file/{path} |
 | 知识库 | GET /knowledge/stats · GET /knowledge/list · POST /knowledge/add · PUT/DELETE /knowledge/{doc_id} |
 | 对话 | POST /chat/stream(SSE,五类意图路由) |
-| 测试 Agent | POST /test/run · POST /test/stream(SSE) · POST /test/resume/{id}(SSE) · GET /test/tasks/{id} · POST /test/stop/{id} · POST /test/code/fix · GET /test/project/files |
+| 测试 Agent | POST /test/stream(SSE) · POST /test/resume/{id}(SSE) · GET /test/tasks/{id} · POST /test/stop/{id} · POST /test/code/fix · GET /test/project/files |
 
 测试入口公共参数:`use_vision`(None 跟随全局)、`storage_state`(登录态档案名)、`max_steps`(run)、`project_id`(托管项目ID,/chat/stream 与 /test/stream 可选;指定时代码定位与修复写入该项目,缺省回落自动创建的 test_project 目录)。
 
@@ -178,10 +181,10 @@ await_fix:interrupt() 暂停 → /test/code/fix 逐个确认 → AI 补丁自动
 | Agent | LangGraph(状态机 + AsyncSqliteSaver 检查点 + interrupt 人工介入) |
 | LLM | OpenAI 兼容协议多平台;Instructor 结构化输出 |
 | 感知/执行 | Playwright(Chromium):元素索引、页面摘要、确定性断言、storage_state |
-| RAG | ChromaDB + sentence-transformers(bge-small-zh-v1.5 / bge-reranker-base) |
+| RAG | ChromaDB + OpenAI 兼容 Embedding API(本地 torch/bge 已移除) |
 | 前端 | React 18 + TypeScript(strict) + Vite 6 + Tailwind CSS + lucide-react |
-| 安全 | PyJWT + bcrypt;路径围栏;CORS 白名单;zip-slip 防护 |
-| 观测 | Langfuse(可选,openai 客户端自动埋点) |
+| 安全 | AES-GCM 凭据加密;路径围栏;回环绑定;zip-slip 防护 |
+| 观测 | 结构化 logging(凭据不落日志) |
 
 ## 关键设计决策
 
@@ -203,13 +206,11 @@ python -m venv venv && venv\Scripts\activate
 pip install -r requirements.txt
 # 2. Playwright 浏览器
 python -m playwright install chromium
-# 3. 预下载模型(HF 镜像已内置配置)
-python -c "import os; os.environ['HF_ENDPOINT']='https://hf-mirror.com'; from sentence_transformers import SentenceTransformer, CrossEncoder; SentenceTransformer('BAAI/bge-small-zh-v1.5'); CrossEncoder('BAAI/bge-reranker-base')"
-# 4. 启动(首次自动建表/生成 JWT 密钥)
+# 3. 启动(首次自动建表/归并本地用户;无模型预下载,Embedding 走 API)
 python main.py
 ```
 
-服务 `http://localhost:2222`,API 文档 `/docs`。旧版 knowledge_base/(英文模型 384 维向量)不兼容,启动前删除即可,运行时亦有明确报错提示。
+服务 `http://localhost:2222`,API 文档 `/docs`。知识库需在 .env 配置 EMBEDDING_API_KEY/EMBEDDING_API_BASE/EMBEDDING_MODEL 后启用;旧版 knowledge_base/(本地 bge 模型向量)不兼容,启动前删除即可。
 
 ### 前端
 
@@ -224,19 +225,26 @@ npm run build   # 产物输出 ../frontend/,由后端 / 直接服务
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| JWT_SECRET_KEY | 自动生成 | 留空/占位符时首启生成随机密钥存 data/.jwt_secret |
+| HOST / PORT | 127.0.0.1 / 2222 | 服务绑定地址(容器内设 HOST=0.0.0.0,由端口映射兜底安全) |
 | CORS_ORIGINS | localhost:5173 | 逗号分隔白名单,"*" 显式放开 |
-| EMBEDDING_MODEL | BAAI/bge-small-zh-v1.5 | 更换后需清空知识库重建 |
+| TESTASSISTANT_CREDENTIAL_SECRET | 空 | 凭据加密密钥材料;缺省由机器信息派生(数据文件拷到其他机器密文自动失效) |
+| EMBEDDING_API_KEY / EMBEDDING_API_BASE / EMBEDDING_MODEL | 空 | OpenAI 兼容 embeddings 接口;不配则知识库向量能力禁用(其余功能正常) |
 | RAG_CHUNK_SIZE / RAG_CHUNK_OVERLAP | 500 / 100 | 分块参数 |
 | RAG_MIN_SIMILARITY | 0.3 | 检索相关度阈值(cosine) |
-| RAG_RERANK_ENABLED / RAG_RERANK_MODEL | true / BAAI/bge-reranker-base | 重排(缺失自动跳过) |
 | TEST_AGENT_VISION | false | 测试 Agent 视觉感知全局默认 |
-| LANGFUSE_PUBLIC_KEY / SECRET_KEY / HOST | 空 | 三项齐备启用 LLM 调用追踪 |
+| TEST_AGENT_HEADLESS | true | 浏览器无头运行;本机开发观察过程设 false |
 
 ## 已知限制
 
-- API Key 在数据库中明文存储(传输/展示层已掩码,存储加密未做)
+- 检索重排(CrossEncoder)已随本地模型依赖移除,仅阈值过滤
 - 前端未做移动端适配;登录态(storage_state)暂仅 API 支持,无管理界面
 - web_test 的浏览器操作过程不落 conversations 表(产物在 test_recordings/)
 - 测试用例生成结果为文本格式,非结构化用例表
-- 浏览器 headless=False,服务器无显示器环境不可直接运行
+- 项目文件夹上传暂无前端界面(ZIP 上传走 API,或直接放入 test_project/ 目录)
+
+## 打包(exe, testAExe 分支)
+
+- 构建: `build_exe.bat`(前端构建 → PyInstaller onedir → 拷贝 frontend 到 exe 旁);产物 `dist/testassistant/`
+- 代码/资产分层(对齐 ZCode): exe+_internal 为代码,`frontend/` 在 exe 旁,**用户数据固定 `~/.testassistant/`**(`TESTASSISTANT_STORAGE_DIR` 可重定向),升级替换 exe 不动数据
+- 浏览器依赖宿主机 Playwright Chromium(默认 `%LOCALAPPDATA%\ms-playwright`,随 `playwright install chromium` 安装)
+- 已知坑: 凭据加密的机器绑定含 hostname,**Docker 容器重建(换 hostname)会使已存 API Key 失效**,需重新配置或固定 `TESTASSISTANT_CREDENTIAL_SECRET`;Windows 桌面环境稳定

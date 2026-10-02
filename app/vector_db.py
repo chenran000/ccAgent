@@ -1,26 +1,30 @@
-"""向量数据库模块 - ChromaDB（按用户隔离）+ 分块/阈值/重排 RAG 管线
+"""向量数据库模块 - ChromaDB（按用户隔离）+ 分块/阈值 RAG 管线
 
-检索链路: 超量召回 → 相关度阈值过滤 → CrossEncoder 重排 → 截断 top_k。
-入库链路: 中文友好分块(段落/句子边界,超长句硬切保留重叠) → 同一文档的分块
-共享 doc_id 元数据,删除/列表均按父文档聚合。
+Embedding 走 OpenAI 兼容 API(打包 exe 前移除本地 torch/bge 模型依赖,体积 -1.5GB+):
+- 配置来源: EMBEDDING_API_KEY/EMBEDDING_API_BASE/EMBEDDING_MODEL 环境变量;
+  未配置时降级为"无向量能力"(入库/检索返回空,其余功能不受影响)
+检索链路: 超量召回 → 相关度阈值过滤 → 截断 top_k(原 CrossEncoder 重排已移除)。
+入库链路: 中文友好分块 → 同一文档分块共享 doc_id 元数据,删除/列表按父文档聚合。
 """
 import hashlib
-import os
+import logging
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import chromadb
 from chromadb import Documents, EmbeddingFunction, Embeddings
 
 from app.config import (
+    EMBEDDING_API_BASE,
+    EMBEDDING_API_KEY,
     EMBEDDING_MODEL,
     KNOWLEDGE_DIR,
     RAG_CHUNK_OVERLAP,
     RAG_CHUNK_SIZE,
     RAG_MIN_SIMILARITY,
-    RAG_RERANK_ENABLED,
-    RAG_RERANK_MODEL,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def chunk_text(text: str, chunk_size: int = None, overlap: int = None) -> List[str]:
@@ -52,21 +56,27 @@ def chunk_text(text: str, chunk_size: int = None, overlap: int = None) -> List[s
     return chunks
 
 
-class SentenceTransformerEmbedding(EmbeddingFunction):
-    """使用 sentence-transformers 本地模型生成高质量文本向量"""
+class OpenAICompatEmbedding(EmbeddingFunction):
+    """OpenAI 兼容 /v1/embeddings API 的 Embedding 函数(惰性建客户端)"""
 
-    def __init__(self, model_name: str = EMBEDDING_MODEL):
-        from sentence_transformers import SentenceTransformer
-        # 优先使用环境变量指定镜像
-        if "HF_ENDPOINT" not in os.environ:
-            os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-        # 优先加载本地缓存，不尝试联网
-        self._model = SentenceTransformer(model_name, local_files_only=True)
+    def __init__(self, api_key: str, api_base: str, model_name: str):
+        self._api_key = api_key
+        self._api_base = api_base
+        self._model_name = model_name
+        self._client: Optional[Any] = None
+
+    def _get_client(self):
+        if self._client is None:
+            from openai import OpenAI
+            self._client = OpenAI(api_key=self._api_key, base_url=self._api_base)
+        return self._client
 
     def __call__(self, input: Documents) -> Embeddings:
-        embeddings = self._model.encode(input, show_progress_bar=False)
-        # 确保返回 list[list[float]] 格式
-        return [emb.tolist() for emb in embeddings]
+        resp = self._get_client().embeddings.create(
+            model=self._model_name,
+            input=list(input),
+        )
+        return [item.embedding for item in resp.data]
 
 
 class ChromaVectorDB:
@@ -75,21 +85,27 @@ class ChromaVectorDB:
     def __init__(self):
         KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
 
-        # 当前使用的 Embedding 模型（更换后旧集合维度不兼容，需清空知识库重建）
+        # API Embedding 配置;未配置则整个向量能力降级禁用
+        self.enabled = bool(EMBEDDING_API_KEY and EMBEDDING_API_BASE and EMBEDDING_MODEL)
         self.model_name = EMBEDDING_MODEL
         self.min_similarity = RAG_MIN_SIMILARITY
-
-        # 重排模型懒加载缓存
-        self._reranker = None
-        self._reranker_failed = False
 
         # 创建持久化 Chroma 客户端
         self.client = chromadb.PersistentClient(path=str(KNOWLEDGE_DIR))
 
-        # 本地 Embedding 函数（sentence-transformers，语义级理解）
-        self.embedding_function = SentenceTransformerEmbedding(
-            model_name=self.model_name
-        )
+        # 本地 Embedding 函数(API 调用)
+        self.embedding_function: Optional[EmbeddingFunction] = None
+        if self.enabled:
+            self.embedding_function = OpenAICompatEmbedding(
+                api_key=EMBEDDING_API_KEY,
+                api_base=EMBEDDING_API_BASE,
+                model_name=self.model_name,
+            )
+        else:
+            logger.warning(
+                "未配置 EMBEDDING_API_KEY/EMBEDDING_API_BASE/EMBEDDING_MODEL,"
+                "知识库向量能力已禁用(添加/检索不可用,其余功能正常)"
+            )
 
         # 集合缓存（user_id → collection），避免每次调用都重复做兼容性校验
         self._collections: Dict[int, Any] = {}
@@ -102,6 +118,12 @@ class ChromaVectorDB:
         """获取或创建用户的知识集合（带 Embedding 模型兼容性校验）"""
         if user_id in self._collections:
             return self._collections[user_id]
+
+        if not self.enabled:
+            raise RuntimeError(
+                "知识库向量能力未启用:请在 .env 配置 EMBEDDING_API_KEY/"
+                "EMBEDDING_API_BASE/EMBEDDING_MODEL(OpenAI 兼容 embeddings 接口)"
+            )
 
         collection = self.client.get_or_create_collection(
             name=self._get_collection_name(user_id),
@@ -128,22 +150,9 @@ class ChromaVectorDB:
                 collection.query(query_texts=["兼容性检查"], n_results=1)
             except Exception as e:
                 raise RuntimeError(
-                    f"知识库向量维度与当前 Embedding 模型 {self.model_name} 不匹配"
-                    f"（旧知识库由 all-MiniLM-L6-v2 构建），请清空知识库后重新添加文档: {e}"
+                    f"知识库向量维度与当前 Embedding 模型 {self.model_name} 不匹配，"
+                    f"请清空知识库后重新添加文档: {e}"
                 )
-
-    def _get_reranker(self):
-        """懒加载 CrossEncoder 重排模型；本地无模型时优雅降级为不重排"""
-        if not RAG_RERANK_ENABLED:
-            return None
-        if self._reranker is None and not self._reranker_failed:
-            try:
-                from sentence_transformers import CrossEncoder
-                self._reranker = CrossEncoder(RAG_RERANK_MODEL, max_length=512)
-            except Exception as e:
-                print(f"[RAG] 重排模型 {RAG_RERANK_MODEL} 不可用，已跳过重排: {e}")
-                self._reranker_failed = True
-        return self._reranker
 
     def add_document(self, content: str, user_id: int, metadata: dict = None) -> str:
         """添加文档：自动分块入库，同一文档的所有分块共享 doc_id 元数据"""
@@ -169,7 +178,9 @@ class ChromaVectorDB:
         return doc_id
 
     def search(self, query: str, user_id: int, top_k: int = 3) -> list:
-        """搜索：超量召回 → 阈值过滤 → 重排 → 截断 top_k"""
+        """搜索：超量召回 → 阈值过滤 → 截断 top_k"""
+        if not self.enabled:
+            return []
         collection = self._get_collection(user_id)
         if collection.count() == 0:
             return []
@@ -200,28 +211,12 @@ class ChromaVectorDB:
                 }
             })
 
-        if not candidates:
-            return []
-
-        return self._rerank(query, candidates)[:top_k]
-
-    def _rerank(self, query: str, candidates: list) -> list:
-        """CrossEncoder 精排；模型不可用时按向量相似度原序返回"""
-        reranker = self._get_reranker()
-        if reranker is None or len(candidates) <= 1:
-            return candidates
-        try:
-            scores = reranker.predict([(query, c["document"]["content"]) for c in candidates])
-        except Exception as e:
-            print(f"[RAG] 重排失败，按向量相似度返回: {e}")
-            return candidates
-        for candidate, score in zip(candidates, scores):
-            candidate["rerank_score"] = round(float(score), 4)
-        candidates.sort(key=lambda c: c["rerank_score"], reverse=True)
-        return candidates
+        return candidates[:top_k]
 
     def list_documents(self, user_id: int) -> list:
         """按父文档聚合分块，返回文档级列表"""
+        if not self.enabled:
+            return []
         collection = self._get_collection(user_id)
         if collection.count() == 0:
             return []
@@ -249,6 +244,8 @@ class ChromaVectorDB:
 
     def get_stats(self, user_id: int) -> dict:
         """获取指定用户的数据库统计信息"""
+        if not self.enabled:
+            return {"total_docs": 0, "index_ready": False}
         collection = self._get_collection(user_id)
         return {
             "total_docs": collection.count(),
@@ -270,7 +267,8 @@ class ChromaVectorDB:
         collection_name = self._get_collection_name(user_id)
         self.client.delete_collection(collection_name)
         self._collections.pop(user_id, None)
-        self._get_collection(user_id)
+        if self.enabled:
+            self._get_collection(user_id)
 
 
 # 全局单例

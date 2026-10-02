@@ -2,24 +2,7 @@
 from typing import List, Optional
 from pydantic import BaseModel
 
-# ========== 认证相关模型 ==========
-
-class RegisterRequest(BaseModel):
-    username: str
-    password: str
-
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-
-class AuthResponse(BaseModel):
-    token: str
-    username: str
-    message: str
-
-class UserInfo(BaseModel):
-    id: int
-    username: str
+# ========== 认证相关模型(单用户本地版已移除登录,保留占位以兼容旧导入) ==========
 
 # ========== 对话历史相关模型 ==========
 
@@ -171,15 +154,6 @@ class ActiveModelResponse(BaseModel):
     use_default: bool
 
 # ========== Web 测试 Agent 相关模型 ==========
-
-class TestTaskRequest(BaseModel):
-    """Web测试任务请求"""
-    target_url: str  # 目标测试网址
-    project_path: str  # 本地项目代码路径
-    test_goals: List[str]  # 测试目标列表，如["测试登录功能", "测试搜索框"]
-    max_steps: int = 30  # 最大测试步骤数
-    use_vision: Optional[bool] = None  # 视觉感知开关（None 跟随全局 TEST_AGENT_VISION 配置）
-    storage_state: Optional[str] = None  # 登录态档案名（首次执行保存，后续复用免登录）
 
 class TestRequest(BaseModel):
     """流式测试请求"""

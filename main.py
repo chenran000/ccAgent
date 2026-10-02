@@ -1,10 +1,18 @@
 """主入口模块"""
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 from app.config import CORS_ORIGINS, HOST, PORT, LOG_LEVEL, RELOAD
 from app.routes import register_routes
+
+# 统一日志输出(stderr;协议 stdout 纪律:保持 stdout 干净给未来 CLI/协议模式)
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL.upper(), logging.INFO),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 # 创建 FastAPI 应用
 app = FastAPI(title="TestAssistant AI API")

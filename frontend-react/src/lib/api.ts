@@ -16,19 +16,12 @@ import type {
 export { API_BASE };
 
 async function request(url: string, options: RequestInit = {}): Promise<Response> {
-  const token = localStorage.getItem('auth_token');
+  // 单用户本地版:无鉴权头,仅维护 Content-Type(FormData 需浏览器自动设 boundary)
   const headers: Record<string, string> = { ...(options.headers as Record<string, string>) };
   if (!(options.body instanceof FormData)) {
     headers['Content-Type'] = 'application/json';
   }
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res = await fetch(`${API_BASE}${url}`, { ...options, headers });
-  if (res.status === 401) {
-    localStorage.removeItem('auth_token');
-    window.location.reload();
-    throw new Error('登录已过期');
-  }
-  return res;
+  return fetch(`${API_BASE}${url}`, { ...options, headers });
 }
 
 export async function apiJson<T = unknown>(url: string, options: RequestInit = {}): Promise<T> {

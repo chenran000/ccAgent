@@ -10,9 +10,10 @@
 - 运行中/等待确认时,浏览器会话保存在进程内注册表
 - 进程重启后恢复任务会新开浏览器并重新导航(任务状态不丢,页面会话重建)
 
-注意: ai_config(含 api_key)会随 checkpoint 明文落盘到 data/checkpoints.db,
-与 model_configs 表的明文存储策略一致。
+安全: 状态中只保存 model_config_id 引用,AI 配置由 app.ai_config.load_ai_config
+按 id 现取并解密,API Key 不落检查点明文。
 """
+import logging
 import asyncio
 import base64
 import os
@@ -25,10 +26,11 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, StateGraph
 from langgraph.types import interrupt
 
+from app.ai_config import load_ai_config
 from app.analysis_service import retrieve_knowledge
 from app.browser_capture import BrowserCapture
 from app.code_analyzer import analyze_and_fix_code
-from app.config import CHECKPOINT_DB_PATH, DATA_DIR
+from app.config import CHECKPOINT_DB_PATH, DATA_DIR, TEST_AGENT_HEADLESS
 from app.script_generator import (
     RECORDINGS_DIR_NAME,
     build_playwright_script,
@@ -36,6 +38,9 @@ from app.script_generator import (
     stable_selector_from_descriptor,
 )
 from app.test_engine import _call_ai_for_code_analysis, _call_ai_for_test_step
+
+logger = logging.getLogger(__name__)
+
 
 # ========== 运行时注册表(仅进程内,不持久化) ==========
 
@@ -55,7 +60,7 @@ class TestTaskState(TypedDict, total=False):
     target_url: str
     project_path: str
     test_goals: List[str]
-    ai_config: Dict[str, str]
+    model_config_id: int
     max_steps: int
     use_vision: bool
     # 登录态档案名(提供时自动保存/复用登录态)
@@ -90,7 +95,7 @@ def new_task_state(
     target_url: str,
     project_path: str,
     test_goals: List[str],
-    ai_config: dict,
+    model_config_id: int,
     max_steps: int,
     use_vision: bool = False,
     storage_state: str = "",
@@ -102,7 +107,7 @@ def new_task_state(
         target_url=target_url,
         project_path=project_path,
         test_goals=test_goals,
-        ai_config=ai_config,
+        model_config_id=model_config_id,
         max_steps=max_steps,
         use_vision=use_vision,
         storage_state=storage_state,
@@ -115,7 +120,9 @@ def _storage_state_path(user_id: int, profile: str) -> str:
     safe = re.sub(r"[^a-zA-Z0-9_\-]", "", profile or "")
     if not safe:
         return ""
-    return str(DATA_DIR / "storage_states" / str(user_id) / f"{safe}.json")
+    path = DATA_DIR / "storage_states" / str(user_id) / f"{safe}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return str(path)
 
 
 async def _get_browser(state: TestTaskState) -> BrowserCapture:
@@ -123,7 +130,7 @@ async def _get_browser(state: TestTaskState) -> BrowserCapture:
     task_id = state["task_id"]
     browser = _browser_sessions.get(task_id)
     if browser is None:
-        browser = BrowserCapture(headless=False)  # 非 headless 以便观察
+        browser = BrowserCapture(headless=TEST_AGENT_HEADLESS)  # 默认无头,开发可用 TEST_AGENT_HEADLESS=false 观察
         storage_path = _storage_state_path(
             state.get("user_id", 0), state.get("storage_state", "")
         )
@@ -146,8 +153,9 @@ async def _close_browser(task_id: str):
 
 async def init_node(state: TestTaskState) -> dict:
     """任务初始化:校验配置,检索业务知识增强测试目标,初始化进度字段"""
-    if not (state.get("ai_config") or {}).get("api_key"):
-        return {"status": "failed", "message": "未配置AI模型"}
+    ai_config = load_ai_config(state.get("model_config_id", 0), state.get("user_id", 0))
+    if not ai_config.get("api_key"):
+        return {"status": "failed", "message": "未配置AI模型或凭据不可用"}
     if not os.path.isdir(state["project_path"]):
         return {"status": "failed", "message": f"项目路径不存在: {state['project_path']}"}
 
@@ -228,6 +236,17 @@ async def test_step_node(state: TestTaskState) -> dict:
         interactive_elements = await browser.get_interactive_elements()
         page_digest = await browser.get_page_digest()
 
+        # AI 配置按 id 现取(不进检查点);失效则安全终止
+        ai_config = load_ai_config(state["model_config_id"], state["user_id"])
+        if not ai_config.get("api_key"):
+            await _close_browser(task_id)
+            return {
+                "status": "failed",
+                "message": "AI 模型配置不可用(已被删除或凭据失效)",
+                "steps": state.get("steps", []),
+                "code_issues": state.get("code_issues", []),
+            }
+
         decision = await asyncio.to_thread(
             _call_ai_for_test_step,
             test_goal=state["test_goals"][goal_index],
@@ -235,7 +254,7 @@ async def test_step_node(state: TestTaskState) -> dict:
             console_errors=errors_before["console"],
             network_errors=errors_before["network"],
             history=state.get("steps", [])[-10:],
-            ai_config=state["ai_config"],
+            ai_config=ai_config,
             interactive_elements=interactive_elements,
             page_digest=page_digest,
             use_vision=use_vision,
@@ -432,7 +451,7 @@ async def analyze_issue_node(state: TestTaskState) -> dict:
                 network_errors=step_errors["network"],
                 project_path=state["project_path"],
                 screenshot_desc=last.get("result", ""),
-                ai_config=state["ai_config"],
+                ai_config=load_ai_config(state["model_config_id"], state["user_id"]),
             )
         except Exception as e:
             await _close_browser(state["task_id"])
@@ -479,7 +498,7 @@ async def finalize_node(state: TestTaskState) -> dict:
         try:
             await browser.save_storage_state()
         except Exception as e:
-            print(f"[登录态] 保存失败: {e}")
+            logger.warning("登录态保存失败: %s", e)
 
     await _close_browser(task_id)
     stop_requested.discard(task_id)
@@ -509,7 +528,7 @@ async def finalize_node(state: TestTaskState) -> dict:
                 script_path = f"{RECORDINGS_DIR_NAME}/test_{task_id}.py"
                 message = f"{message}；回放脚本已保存至 {script_path}"
             except Exception as e:
-                print(f"[脚本沉淀] 生成失败: {e}")
+                logger.warning("回放脚本生成失败: %s", e)
             try:
                 duration_seconds = 0.0
                 try:
@@ -536,7 +555,7 @@ async def finalize_node(state: TestTaskState) -> dict:
                     f.write(report)
                 report_path = f"{RECORDINGS_DIR_NAME}/report_{task_id}.md"
             except Exception as e:
-                print(f"[测试报告] 生成失败: {e}")
+                logger.warning("测试报告生成失败: %s", e)
 
     updates = {
         "status": status,
@@ -579,7 +598,7 @@ async def await_fix_node(state: TestTaskState) -> dict:
             error_log=issue.get("error_log", ""),
             issue_description=issue.get("issue_description", ""),
             suggested_fix=issue.get("suggested_fix", ""),
-            ai_config=state["ai_config"],
+            ai_config=load_ai_config(state["model_config_id"], state["user_id"]),
             auto_fix=True,
             allowed_root=state.get("project_path", ""),
         )

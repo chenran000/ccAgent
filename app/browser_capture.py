@@ -1,10 +1,13 @@
 """浏览器错误收集模块 - 使用 Playwright 捕获 Console/Network 错误与可交互元素"""
+import logging
 import base64
 import os
 import re
 import sys
 from typing import List, Dict, Optional
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
+
+logger = logging.getLogger(__name__)
 
 # 采集页面结构摘要(标题/标题层级/表单概览),供 DOM 文本感知模式替代截图
 _COLLECT_PAGE_DIGEST_JS = r"""
@@ -259,7 +262,7 @@ class BrowserCapture:
             try:
                 await self.context.storage_state(path=self.storage_state_path)
             except Exception as e:
-                print(f"[登录态] 保存失败: {e}")
+                logger.warning("登录态保存失败: %s", e)
 
     async def close(self):
         """关闭浏览器"""

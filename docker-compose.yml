@@ -4,11 +4,21 @@ services:
     image: testassistant-ai:latest
     container_name: testassistant-ai
     ports:
-      - "2222:2222"
+      # 只映射到本机回环(单用户版无鉴权,不暴露局域网)
+      - "127.0.0.1:2222:2222"
     environment:
-      # 同源部署 + 局域网访问场景,放开 CORS(生产请收敛为具体来源)
+      # 容器内必须绑 0.0.0.0 才能被端口映射访问(安全由端口映射限制到回环)
+      HOST: 0.0.0.0
+      # 同源部署场景,CORS 白名单放开由端口映射兜底
       CORS_ORIGINS: "*"
       TEST_AGENT_VISION: "false"
+      TEST_AGENT_HEADLESS: "true"
+      # 知识库向量能力(OpenAI 兼容 embeddings;不配则该功能禁用,其余正常)
+      # 注意:容器重建会更换 hostname 导致已加密 API Key 失效,生产请固定 secret:
+      # TESTASSISTANT_CREDENTIAL_SECRET: "任意固定字符串"
+      # EMBEDDING_API_KEY: ""
+      # EMBEDDING_API_BASE: "https://open.bigmodel.cn/api/paas/v4"
+      # EMBEDDING_MODEL: "embedding-3"
     volumes:
       - ./data:/app/data
       - ./knowledge_base:/app/knowledge_base

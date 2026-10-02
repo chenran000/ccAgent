@@ -3,6 +3,8 @@
 统一走 app.llm.create_structured 结构化输出;枚举字段做软校验,
 模型返回超出枚举的值时回落到默认枚举值,避免脏数据入库。
 """
+import logging
+
 from app.llm import BugAnalysis, CodeReview, TestCaseSet, create_structured
 from app.prompts import (
     BUG_ANALYSIS_PROMPT,
@@ -12,6 +14,8 @@ from app.prompts import (
     SEVERITY_LEVELS,
     TEST_CASE_PROMPT,
 )
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_BUG_TYPE = "逻辑错误"
 _DEFAULT_SEVERITY = "一般"
@@ -34,7 +38,7 @@ def retrieve_knowledge(query: str, user_id: int, top_k: int = 3) -> tuple[str, l
         from app.vector_db import vector_db  # 延迟导入,向量库不可用时优雅降级
         results = vector_db.search(query, user_id, top_k)
     except Exception as e:
-        print(f"[RAG] 知识检索失败,跳过增强: {e}")
+        logger.warning("知识检索失败,跳过增强: %s", e)
         return "", []
     if not results:
         return "", []

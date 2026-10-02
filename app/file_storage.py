@@ -1,15 +1,13 @@
 """文件存储模块 - 管理用户上传的文件"""
+import logging
 import os
 import uuid
-from pathlib import Path
-from typing import Optional, List
 from datetime import datetime, timezone
 
+from app.config import UPLOAD_DIR
 from app.file_parser import parse_file
 
-# 文件存储目录
-UPLOAD_DIR = Path(__file__).parent.parent / "uploads"
-UPLOAD_DIR.mkdir(exist_ok=True)
+logger = logging.getLogger(__name__)
 
 # 支持的文件类型
 SUPPORTED_TYPES = {
@@ -20,7 +18,7 @@ SUPPORTED_TYPES = {
 SUPPORTED_EXTENSIONS = {".pdf", ".txt"}
 
 
-def get_user_upload_dir(user_id: int) -> Path:
+def get_user_upload_dir(user_id: int):
     """获取用户专属的上传目录"""
     user_dir = UPLOAD_DIR / str(user_id)
     user_dir.mkdir(exist_ok=True)
@@ -58,7 +56,7 @@ def save_file(file_bytes: bytes, filename: str, user_id: int) -> dict:
         extracted_text = parse_file(str(file_path), filename)
     except Exception as e:
         # 如果解析失败，记录错误但文件仍然保存
-        print(f"[文件解析警告] {filename}: {e}")
+        logger.warning("文件解析失败但文件已保存: %s: %s", filename, e)
         extracted_text = f"[解析失败: {e}]"
 
     return {

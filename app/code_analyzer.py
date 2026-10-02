@@ -1,9 +1,12 @@
 """代码分析/定位/修改模块"""
+import logging
 import os
 from typing import Optional
 
 from app.llm import CodeFixResult, create_structured
 from app.prompts import CODE_FIX_PROMPT
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_within_root(file_path: str, allowed_root: str):
@@ -39,7 +42,7 @@ def write_file_content(file_path: str, content: str, allowed_root: str = "") -> 
     """写入文件内容（提供 allowed_root 时强制路径围栏）"""
     target = _resolve_within_root(file_path, allowed_root)
     if not target:
-        print(f"写入文件被拒绝（路径越界）: {file_path}")
+        logger.warning("写入文件被拒绝(路径越界): %s", file_path)
         return False
     try:
         # 备份原文件
@@ -52,7 +55,7 @@ def write_file_content(file_path: str, content: str, allowed_root: str = "") -> 
             f.write(content)
         return True
     except Exception as e:
-        print(f"写入文件失败: {e}")
+        logger.error("写入文件失败: %s", e)
         return False
 
 

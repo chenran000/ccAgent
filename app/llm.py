@@ -4,7 +4,6 @@
 - build_plain_client: 普通 OpenAI 兼容客户端(流式输出、自由文本场景)
 - create_structured: 结构化输出(Instructor),TOOLS → JSON mode → 纯文本三级回退,
   兼容 DeepSeek/通义/Kimi/智谱/自定义等平台对函数调用支持不一的情况
-- 配置 LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_HOST 后自动开启调用追踪
 """
 import re
 from typing import List, Optional, Type, TypeVar
@@ -12,8 +11,6 @@ from typing import List, Optional, Type, TypeVar
 import instructor
 import openai
 from pydantic import BaseModel, Field, ValidationError
-
-from app.config import LANGFUSE_HOST, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -88,17 +85,10 @@ class CodeReview(BaseModel):
 
 # ========== 客户端构建 ==========
 
-def _langfuse_enabled() -> bool:
-    return bool(LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY and LANGFUSE_HOST)
-
-
 def build_plain_client(ai_config: dict) -> openai.OpenAI:
-    """构建普通 OpenAI 兼容客户端;配置了 Langfuse 时返回自动埋点客户端"""
+    """构建普通 OpenAI 兼容客户端"""
     api_key = ai_config.get("api_key") or ""
     base_url = ai_config.get("api_base_url") or _DEFAULT_BASE_URL
-    if _langfuse_enabled():
-        from langfuse.openai import OpenAI as TracedOpenAI  # 调用自动上报 Langfuse
-        return TracedOpenAI(api_key=api_key, base_url=base_url)
     return openai.OpenAI(api_key=api_key, base_url=base_url)
 
 

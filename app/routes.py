@@ -1,4 +1,5 @@
 """API 路由定义模块 - TestAssistant AI"""
+import logging
 import asyncio
 import json
 import os
@@ -15,17 +16,17 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
 from app.database import get_db, init_db
+from app.credential_cipher import encrypt_credential, decrypt_credential, is_encrypted
 from app.models import User, Session as SessionModel, Conversation, ModelConfig, UserActiveModel, Document, ProjectFolder
-from app.auth import hash_password, verify_password, create_access_token, get_current_user
+from app.auth import get_current_user
 from app.schemas import (
-    LoginRequest, RegisterRequest, AuthResponse, UserInfo,
     ConversationRecord, ConversationHistoryResponse,
     SessionInfo, SessionListResponse, CreateSessionRequest, UpdateSessionRequest,
     ChatRequest,
     SupportedPlatform, ModelConfigInfo,
     ModelListResponse, AddModelRequest, UpdateModelRequest, TestAIRequest,
     TestAIResponse, ActiveModelResponse,
-    TestTaskRequest, TestTaskResponse, TestStep, TestRequest,
+    TestTaskResponse, TestStep, TestRequest,
     CodeAnalysisRequest, CodeAnalysisResponse, TestCaseRequest, TestCaseResponse,
     CodeIssue, CodeModifyRequest,
     ProjectFolderInfo, ProjectFolderListResponse, ProjectFolderCreateRequest,
@@ -33,7 +34,7 @@ from app.schemas import (
     AddKnowledgeRequest,
 )
 from app.analysis_service import analyze_bug, generate_test_cases, review_code
-from app.config import TEST_AGENT_VISION
+from app.config import PROJECT_FOLDERS_DIR, TEST_AGENT_VISION, TEST_PROJECT_DIR, base_dir
 from app.intent_classifier import classify_intent_local
 from app.llm import build_plain_client
 from app.vector_db import chunk_text, vector_db
@@ -49,6 +50,12 @@ from app.test_agent_graph import (
 )
 from langgraph.types import Command
 
+logger = logging.getLogger(__name__)
+
+# 上传大小上限:文档 20MB / 项目 ZIP 200MB
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+MAX_PROJECT_ZIP_BYTES = 200 * 1024 * 1024
+
 
 def _extract_knowledge_content(content: str) -> str:
     """从"添加知识/记住：xxx"类指令中提取知识正文,无指令前缀时原样返回"""
@@ -63,6 +70,14 @@ def _extract_knowledge_content(content: str) -> str:
 def _resolve_use_vision(requested) -> bool:
     """视觉感知开关:请求未指定时跟随全局 TEST_AGENT_VISION 配置"""
     return TEST_AGENT_VISION if requested is None else bool(requested)
+
+
+def _resolve_test_url(content: str, browser_url: str | None) -> str | None:
+    """从测试指令中提取目标 URL;缺省回落浏览器面板当前 URL"""
+    match = re.search(r'https?://[^\s]+', content or "")
+    if match:
+        return match.group(0)
+    return browser_url or None
 
 
 def _state_to_response(task_id: str, values: dict) -> TestTaskResponse:
@@ -144,50 +159,73 @@ def _test_sse_response(graph_input, task_id: str, start_payload: dict = None) ->
     return StreamingResponse(_event_generator(), media_type="text/event-stream")
 
 
+def _migrate_plaintext_credentials():
+    """单用户迁移 + 启动一次性加密:
+    1. 确保内置 "local" 用户存在,把历史多用户数据全部归并到它(单用户本地版语义)
+    2. 把明文 API Key 加密落盘(幂等,已加密的跳过)"""
+    from app.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        local = db.query(User).filter(User.username == "local").first()
+        if local is None:
+            first = db.query(User).order_by(User.id.asc()).first()
+            if first is not None and first.username != "local":
+                first.username = "local"  # 复用最早用户(保留其 created_at),改名收编
+                local = first
+            else:
+                local = User(username="local", password_hash="")
+                db.add(local)
+                db.flush()
+        assert local is not None
+
+        merged = 0
+        for model in (ModelConfig, UserActiveModel, Conversation, Document, ProjectFolder, SessionModel):
+            changed = db.query(model).filter(model.user_id != local.id).update(
+                {model.user_id: local.id}, synchronize_session=False
+            )
+            merged += changed
+        # 归并后删除其他用户行
+        db.query(User).filter(User.id != local.id).delete(synchronize_session=False)
+        # 旧会话记录的 user_active_models 可能重复指向同一 config,unique 约束兜底忽略
+        if merged:
+            db.commit()
+            logger.info("已归并 %d 条历史数据到本地用户(id=%s)", merged, local.id)
+        elif db.query(User).count() != 1:
+            db.commit()
+
+        rows = db.query(ModelConfig).all()
+        migrated = 0
+        for mc in rows:
+            if mc.api_key and not is_encrypted(mc.api_key):
+                mc.api_key = encrypt_credential(mc.api_key)
+                migrated += 1
+        if migrated:
+            db.commit()
+            logger.info("已加密迁移 %d 条明文 API Key", migrated)
+    except Exception as e:
+        db.rollback()
+        logger.warning("启动迁移失败(不影响启动): %s", e)
+    finally:
+        db.close()
+
+
 def register_routes(app):
     """注册所有 API 路由"""
 
     # 初始化数据库
     init_db()
+    _migrate_plaintext_credentials()
 
-    # 前端静态文件路径
-    frontend_dir = Path(__file__).parent.parent / "frontend"
+    # 前端静态文件路径(源码模式=仓库根/frontend;打包模式=exe 旁/frontend)
+    frontend_dir = base_dir / "frontend"
 
     # vite 构建产物静态资源(/assets/*);目录不存在(未执行 npm run build)时跳过
     if (frontend_dir / "assets").is_dir():
         app.mount("/assets", StaticFiles(directory=frontend_dir / "assets"), name="assets")
 
-    # ==================== 认证接口 ====================
-
-    @app.post("/auth/register", response_model=AuthResponse)
-    async def register(request: RegisterRequest, db: Session = Depends(get_db)):
-        """用户注册"""
-        existing = db.query(User).filter(User.username == request.username).first()
-        if existing:
-            raise HTTPException(status_code=400, detail="用户名已存在")
-
-        user = User(username=request.username, password_hash=hash_password(request.password))
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-
-        token = create_access_token(user.id, user.username)
-        return AuthResponse(token=token, username=user.username, message="注册成功")
-
-    @app.post("/auth/login", response_model=AuthResponse)
-    async def login(request: LoginRequest, db: Session = Depends(get_db)):
-        """用户登录"""
-        user = db.query(User).filter(User.username == request.username).first()
-        if not user or not verify_password(request.password, user.password_hash):
-            raise HTTPException(status_code=401, detail="用户名或密码错误")
-
-        token = create_access_token(user.id, user.username)
-        return AuthResponse(token=token, username=user.username, message="登录成功")
-
-    @app.get("/auth/me", response_model=UserInfo)
-    async def get_me(current_user: User = Depends(get_current_user)):
-        """获取当前用户信息"""
-        return UserInfo(id=current_user.id, username=current_user.username)
+    # 单用户本地版:已移除 /auth/register|login|me 接口,鉴权依赖 get_current_user
+    # 返回内置本地用户(app/auth.py)
 
     # ==================== 会话管理接口 ====================
 
@@ -296,20 +334,33 @@ def register_routes(app):
     }
 
     def _mask_api_key(key: str) -> str:
-        """脱敏 API Key，只显示前 4 位和后 4 位"""
+        """脱敏 API Key，只显示前 4 位和后 4 位(入参应为已解密的明文)"""
         if not key or len(key) <= 8:
             return "****"
         return key[:4] + "****" + key[-4:]
 
+    def _plain_api_key(mc: ModelConfig) -> str:
+        """读取并解密存储的 API Key"""
+        try:
+            return decrypt_credential(mc.api_key)
+        except ValueError as e:
+            logger.warning("凭据解密失败 id=%s: %s", mc.id, e)
+            return ""
+
+    def _get_user_active_model_id(user_id: int, db: Session) -> int:
+        """获取用户当前激活模型的配置 id(供测试任务状态引用,密钥不进检查点)"""
+        active = db.query(UserActiveModel).filter_by(user_id=user_id).first()
+        return active.model_config_id if active else 0
+
     def _get_user_ai_config(user_id: int, db: Session) -> dict:
-        """获取用户当前使用的 AI 配置"""
+        """获取用户当前使用的 AI 配置(API Key 解密后仅在内存使用)"""
         active = db.query(UserActiveModel).filter_by(user_id=user_id).first()
 
         if active and active.model_config_id:
             mc = db.query(ModelConfig).filter_by(id=active.model_config_id, is_active=1).first()
             if mc:
                 return {
-                    "api_key": mc.api_key,
+                    "api_key": _plain_api_key(mc),
                     "api_base_url": mc.api_base_url,
                     "chat_model": mc.model_name,
                 }
@@ -336,7 +387,7 @@ def register_routes(app):
                 id=mc.id,
                 platform=mc.platform,
                 platform_name=_PLATFORM_INFO.get(mc.platform, {}).get("name", mc.platform),
-                api_key_masked=_mask_api_key(mc.api_key),
+                api_key_masked=_mask_api_key(_plain_api_key(mc)),
                 api_base_url=mc.api_base_url,
                 model_name=mc.model_name,
                 is_active=bool(mc.is_active),
@@ -368,11 +419,11 @@ def register_routes(app):
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db),
     ):
-        """添加模型配置"""
+        """添加模型配置(API Key 加密后落盘)"""
         mc = ModelConfig(
             user_id=current_user.id,
             platform="custom",
-            api_key=request.api_key,
+            api_key=encrypt_credential(request.api_key),
             api_base_url=request.api_base_url,
             model_name=request.model_name,
         )
@@ -403,7 +454,7 @@ def register_routes(app):
             "id": mc.id,
             "platform": mc.platform,
             "platform_name": _PLATFORM_INFO.get(mc.platform, {}).get("name", mc.platform),
-            "api_key_masked": _mask_api_key(mc.api_key),
+            "api_key_masked": _mask_api_key(_plain_api_key(mc)),
             "api_base_url": mc.api_base_url,
             "model_name": mc.model_name,
             "is_active": bool(mc.is_active),
@@ -422,9 +473,9 @@ def register_routes(app):
         if not mc:
             raise HTTPException(status_code=404, detail="模型配置不存在")
 
-        # 忽略脱敏回显值(含 **** 的字符串不是有效密钥),只接受用户新输入的明文 Key
+        # 忽略脱敏回显值(含 **** 的字符串不是有效密钥),只接受用户新输入的明文 Key(加密后落盘)
         if request.api_key and "****" not in request.api_key:
-            mc.api_key = request.api_key
+            mc.api_key = encrypt_credential(request.api_key)
         if request.api_base_url is not None:
             mc.api_base_url = request.api_base_url
         if request.model_name is not None:
@@ -686,6 +737,8 @@ def register_routes(app):
             file_bytes = await file.read()
             if not file_bytes:
                 raise HTTPException(status_code=400, detail="文件不能为空")
+            if len(file_bytes) > MAX_UPLOAD_BYTES:
+                raise HTTPException(status_code=413, detail=f"文件超过大小限制({MAX_UPLOAD_BYTES // 1024 // 1024}MB)")
 
             file_info = save_file(file_bytes, file.filename, current_user.id)
 
@@ -711,7 +764,7 @@ def register_routes(app):
                         metadata={"source": file_info["original_filename"], "doc_id": str(doc.id)}
                     )
                 except Exception as e:
-                    print(f"[知识库同步警告] {e}")
+                    logger.warning("知识库同步失败(文件已保存): %s", e)
 
             return {
                 "id": doc.id,
@@ -809,15 +862,14 @@ def register_routes(app):
 
     # ==================== 项目文件夹接口 ====================
 
-    PROJECT_FOLDERS_DIR = Path(__file__).parent.parent / "project_uploads"
-    PROJECT_FOLDERS_DIR.mkdir(exist_ok=True)
+    # 托管项目目录与默认测试项目目录统一来自 config(存储根目录)
 
     def _is_allowed_project_path(path: str) -> bool:
         """项目路径只允许位于托管项目目录或默认 test_project 目录内，防任意目录遍历"""
         candidate = os.path.abspath(path)
         roots = [
             str(PROJECT_FOLDERS_DIR.resolve()),
-            str((Path(__file__).parent.parent / "test_project").resolve()),
+            str(TEST_PROJECT_DIR.resolve()),
         ]
         return any(
             candidate == root or candidate.startswith(root.rstrip(os.sep) + os.sep)
@@ -843,7 +895,7 @@ def register_routes(app):
                 raise HTTPException(status_code=403, detail="项目路径不在允许的目录内")
             return folder.folder_path
 
-        default_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "test_project")
+        default_path = str(TEST_PROJECT_DIR)
         os.makedirs(default_path, exist_ok=True)
         return default_path
 
@@ -933,6 +985,8 @@ def register_routes(app):
             # 保存临时 ZIP 文件
             temp_zip = folder_path.parent / f"temp_{uuid.uuid4().hex}.zip"
             zip_content = await file.read()
+            if len(zip_content) > MAX_PROJECT_ZIP_BYTES:
+                raise HTTPException(status_code=413, detail=f"ZIP 超过大小限制({MAX_PROJECT_ZIP_BYTES // 1024 // 1024}MB)")
             with open(temp_zip, "wb") as f:
                 f.write(zip_content)
 
@@ -1143,6 +1197,8 @@ def register_routes(app):
     ):
         """添加知识文档到向量数据库"""
         from app.vector_db import vector_db
+        if not vector_db.enabled:
+            raise HTTPException(status_code=503, detail="知识库向量能力未启用:请在 .env 配置 EMBEDDING_API_KEY/EMBEDDING_API_BASE/EMBEDDING_MODEL")
         doc_id = vector_db.add_document(request.content, current_user.id, request.metadata)
         return {"doc_id": doc_id, "message": "知识添加成功"}
 
@@ -1236,10 +1292,7 @@ def register_routes(app):
         confidence = intent_result["confidence"]
 
         if intent == "web_test":
-            url_match = re.search(r'https?://[^\s]+', effective_content)
-            test_url = url_match.group(0) if url_match else None
-            if not test_url and request.browser_url:
-                test_url = request.browser_url
+            test_url = _resolve_test_url(effective_content, request.browser_url)
 
             if not test_url:
                 async def _no_url_generator():
@@ -1254,7 +1307,7 @@ def register_routes(app):
                 target_url=test_url,
                 project_path=project_path,
                 test_goals=[effective_content],
-                ai_config=ai_config,
+                model_config_id=_get_user_active_model_id(current_user.id, db),
                 max_steps=20,
                 use_vision=_resolve_use_vision(request.use_vision),
                 storage_state=request.storage_state or "",
@@ -1420,51 +1473,8 @@ def register_routes(app):
         return FileResponse(frontend_dir / "index.html")
 
     # ========== Web 测试 Agent 相关路由 ==========
-
-    @app.post("/test/run", summary="执行Web自动化测试任务")
-    async def run_test_task(
-        request: TestTaskRequest,
-        db: Session = Depends(get_db),
-        current_user: User = Depends(get_current_user),
-    ):
-        """执行Web自动化测试任务(LangGraph 状态机,每步持久化到检查点)"""
-        if not _is_allowed_project_path(request.project_path):
-            raise HTTPException(status_code=403, detail="项目路径不在允许的目录内")
-
-        user_ai_config = db.query(ModelConfig).filter(
-            ModelConfig.user_id == current_user.id,
-            ModelConfig.is_active == True
-        ).first()
-
-        if not user_ai_config:
-            raise HTTPException(status_code=400, detail="请先在AI模型配置页面添加并启用一个AI模型")
-
-        ai_config = {
-            "api_key": user_ai_config.api_key,
-            "api_base_url": user_ai_config.api_base_url or "https://api.openai.com/v1",
-            "chat_model": user_ai_config.model_name,
-        }
-
-        graph = await test_agent_manager.get_graph()
-        task_id = uuid.uuid4().hex[:16]
-        task_state = new_task_state(
-            task_id=task_id,
-            user_id=current_user.id,
-            target_url=request.target_url,
-            project_path=request.project_path,
-            test_goals=request.test_goals,
-            ai_config=ai_config,
-            max_steps=request.max_steps,
-            use_vision=_resolve_use_vision(request.use_vision),
-            storage_state=request.storage_state or "",
-        )
-
-        final_state = await graph.ainvoke(task_state, config=make_config(task_id))
-
-        if final_state.get("status") == "failed":
-            raise HTTPException(status_code=400, detail=final_state.get("message", "测试执行失败"))
-
-        return _state_to_response(task_id, final_state)
+    # (原 /test/run 同步接口已删除:与 /test/stream 重复且长任务不应占用同步连接,
+    #  统一走 /chat/stream 的 web_test 意图分支或 /test/stream)
 
     @app.post("/test/code/fix", summary="确认代码修复")
     async def confirm_code_fix(
@@ -1579,14 +1589,7 @@ def register_routes(app):
         db: Session = Depends(get_db),
     ):
         """SSE 流式测试接口：实时推送每个测试步骤(任务状态持久化到检查点)"""
-        ai_config = _get_user_ai_config(current_user.id, db)
-
-        # 提取 URL：优先从内容中提取，其次使用浏览器面板当前URL
-        url_match = re.search(r'https?://[^\s]+', request.content)
-        test_url = url_match.group(0) if url_match else None
-
-        if not test_url and request.browser_url:
-            test_url = request.browser_url
+        test_url = _resolve_test_url(request.content, request.browser_url)
 
         if not test_url:
             async def _no_url_generator():
@@ -1602,7 +1605,7 @@ def register_routes(app):
             target_url=test_url,
             project_path=project_path,
             test_goals=[request.content],
-            ai_config=ai_config,
+            model_config_id=_get_user_active_model_id(current_user.id, db),
             max_steps=20,
             use_vision=_resolve_use_vision(request.use_vision),
             storage_state=request.storage_state or "",

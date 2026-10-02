@@ -10,7 +10,6 @@ import {
   Settings,
   Trash2,
 } from 'lucide-react';
-import { useAuth } from '../context/AuthContext';
 import type { SessionInfo } from '../lib/types';
 
 export type MainView = 'chat' | 'knowledge' | 'models';
@@ -34,7 +33,6 @@ const VIEW_ITEMS: { key: MainView; icon: typeof MessageSquare; label: string }[]
 ];
 
 export default function Sidebar(props: SidebarProps) {
-  const { user, logout } = useAuth();
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState('');
 
@@ -165,20 +163,14 @@ export default function Sidebar(props: SidebarProps) {
         </div>
       </div>
 
-      {/* 用户信息 */}
+      {/* 用户信息(单用户本地版,固定显示) */}
       <div className="px-4 py-3 border-t border-border flex items-center gap-2.5">
         <div className="w-8 h-8 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-sm font-semibold shrink-0">
-          {(user?.username || '?').slice(0, 1).toUpperCase()}
+          L
         </div>
         <div className="flex-1 min-w-0">
-          <div className="text-sm text-gray-800 truncate">{user?.username}</div>
+          <div className="text-sm text-gray-800 truncate">本地用户</div>
         </div>
-        <button
-          onClick={logout}
-          className="text-xs text-gray-400 hover:text-red-500 transition-colors shrink-0"
-        >
-          退出
-        </button>
       </div>
     </aside>
   );
