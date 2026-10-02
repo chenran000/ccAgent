@@ -112,14 +112,23 @@ export interface TestRunState {
 }
 
 // ========== 聊天消息(前端渲染模型) ==========
+export interface AgentStep {
+  step: number;
+  action: string;
+  target: string;
+  result: string;
+  success: boolean;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
-  module: string; // chat / code / case / knowledge / web_test
+  module: string; // agent / chat / code / case / knowledge / web_test
   text: string;
   data?: Record<string, unknown>;
   references?: string[];
   testRun?: TestRunState;
+  agentSteps?: AgentStep[];
   pending?: boolean;
   error?: string;
   createdAt: string;

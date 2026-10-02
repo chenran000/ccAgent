@@ -128,6 +128,7 @@ export default function IDELayout() {
                 currentSessionId={currentSessionId}
                 onSessionsChanged={refreshSessions}
                 onKnowledgeAdded={loadKnowledgeStats}
+                workspacePath={workspace.workspacePath}
               />
             ) : (
               <div className="flex-1 flex items-center justify-center text-sm text-gray-400">

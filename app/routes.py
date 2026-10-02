@@ -1420,7 +1420,7 @@ def register_routes(app):
         # 智能体分支:工作区打开时,chat 意图升级为工具调用型 Agent(ZCode 式)
         from app import workspace as ws_mod
         current_workspace = ws_mod.get_current_workspace()
-        if intent == "chat" and current_workspace:
+        if intent in ("chat", "code", "case") and current_workspace:
             async def _agent_generator():
                 from app.agent_loop import stream_agent
                 final_answer = ""

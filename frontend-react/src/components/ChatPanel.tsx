@@ -20,6 +20,7 @@ import {
 } from '../lib/api';
 import {
   emptyTestRun,
+  type AgentStep,
   type ChatMessage,
   type ChatStreamEvent,
   type CodeIssue,
@@ -35,6 +36,7 @@ interface ChatPanelProps {
   currentSessionId: string;
   onSessionsChanged: () => void;
   onKnowledgeAdded: () => void;
+  workspacePath?: string | null;
 }
 
 // ---------- 小工具 ----------
@@ -49,6 +51,12 @@ const genId = () =>
 const pct = (v: unknown): string =>
   typeof v === 'number' && v > 0 ? ` ${Math.round(v * 100)}%` : '';
 
+const SAMPLES_AGENT = [
+  { icon: Bug, text: '分析这个项目的整体结构和技术栈' },
+  { icon: ListChecks, text: '检查项目里有没有硬编码的密码或密钥' },
+  { icon: Sparkles, text: '找出代码中潜在的性能问题并给出修复建议' },
+  { icon: BookOpen, text: '帮我给核心模块补充单元测试' },
+];
 const SAMPLES = [
   { icon: Bug, text: '帮我测试 http://localhost:5000 的登录功能' },
   { icon: ListChecks, text: '为登录功能生成测试用例' },
@@ -172,7 +180,7 @@ function KnowledgeAddedCard({ data }: { data: Record<string, unknown> }) {
 }
 
 // ---------- 主组件 ----------
-export default function ChatPanel(props: ChatPanelProps) {
+export default function ChatPanel({ workspacePath, ...props }: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
@@ -248,6 +256,17 @@ export default function ChatPanel(props: ChatPanelProps) {
           };
         }
         case 'step': {
+          // 智能体的工具步骤内联渲染;web_test 的测试步骤进 testRun 卡片
+          if (m.module === 'agent') {
+            const step: AgentStep = {
+              step: Number(ev.step) || (m.agentSteps?.length ?? 0) + 1,
+              action: asString(ev.action),
+              target: asString(ev.target),
+              result: asString(ev.result),
+              success: ev.success !== false,
+            };
+            return { ...m, agentSteps: [...(m.agentSteps ?? []), step] };
+          }
           const run = m.testRun ?? emptyTestRun();
           const step: TestStep = {
             step: Number(ev.step) || run.steps.length + 1,
@@ -391,6 +410,30 @@ export default function ChatPanel(props: ChatPanelProps) {
     if (m.error) {
       return <div className="text-sm text-red-500">{m.error}</div>;
     }
+    if (m.module === 'agent') {
+      return (
+        <div className="space-y-2 w-full">
+          {(m.agentSteps ?? []).map((s, i) => (
+            <div key={i} className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs">
+              <div className="flex items-center gap-1.5">
+                <span className={`inline-block w-1.5 h-1.5 rounded-full ${s.success ? 'bg-green-500' : 'bg-red-500'}`} />
+                <span className="font-mono font-medium text-blue-700">{s.action}</span>
+                <span className="text-gray-400 truncate font-mono">{s.target}</span>
+              </div>
+              {s.result && (
+                <div className="mt-1 text-gray-500 font-mono whitespace-pre-wrap break-all line-clamp-3">{s.result}</div>
+              )}
+            </div>
+          ))}
+          <div className="text-sm text-gray-800 leading-relaxed whitespace-pre-wrap break-words">
+            {m.text || (m.pending ? '思考中...' : '')}
+            {m.pending && (
+              <span className="inline-block w-1.5 h-4 bg-blue-500 animate-pulse ml-0.5 align-middle rounded-sm" />
+            )}
+          </div>
+        </div>
+      );
+    }
     if (m.module === 'web_test' && m.testRun) {
       return (
         <TestRunCard
@@ -431,12 +474,14 @@ export default function ChatPanel(props: ChatPanelProps) {
               <div className="inline-flex items-center justify-center w-14 h-14 bg-gradient-to-br from-blue-500 to-blue-600 rounded-2xl shadow-lg shadow-blue-500/20 mb-4">
                 <Bug className="w-7 h-7 text-white" />
               </div>
-              <h2 className="text-lg font-bold text-gray-900">开始你的测试任务</h2>
+              <h2 className="text-lg font-bold text-gray-900">{workspacePath ? '开始与项目对话' : '开始你的任务'}</h2>
               <p className="text-sm text-gray-400 mt-1 mb-6">
-                直接描述需求,自动识别意图:Web 自动化测试 / 用例生成 / Bug 分析 / 知识管理
+                {workspacePath
+                  ? '智能体已就绪:代码分析 / Bug 定位 / 规范检查 / 用例生成 / 自动修复,工具执行过程实时可见'
+                  : '直接描述需求,自动识别意图:Web 自动化测试 / 用例生成 / Bug 分析 / 知识管理'}
               </p>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-w-xl mx-auto">
-                {SAMPLES.map(({ icon: Icon, text }) => (
+                {(workspacePath ? SAMPLES_AGENT : SAMPLES).map(({ icon: Icon, text }) => (
                   <button
                     key={text}
                     onClick={() => setInput(text)}
@@ -551,7 +596,7 @@ export default function ChatPanel(props: ChatPanelProps) {
                 }
               }}
               rows={1}
-              placeholder="描述你的测试需求,Enter 发送,Shift+Enter 换行"
+              placeholder="描述你的需求,Enter 发送,Shift+Enter 换行"
               className="flex-1 resize-none px-4 py-2.5 max-h-32 bg-gray-50 border border-gray-200 rounded-xl text-sm text-gray-900 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 transition-all"
             />
             {sending ? (
