@@ -59,7 +59,6 @@ a = Analysis(
         "torch",
         "sentence_transformers",
         "langfuse",
-        "tkinter",
         "matplotlib",
         "PyQt5",
     ],

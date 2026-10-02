@@ -188,6 +188,7 @@ export async function selectFolder(): Promise<string | null> {
     if (Array.isArray(result)) return result[0] || null;
     return result || null;
   }
-  const manual = window.prompt('输入项目文件夹的完整路径(桌面版支持原生选择):');
-  return manual && manual.trim() ? manual.trim() : null;
+  // 桥不可用(浏览器打开/桥未注入):由后端弹系统原生目录选择框
+  const { path } = await apiJson<{ path: string | null }>('/workspace/dialog', { method: 'POST' });
+  return path;
 }

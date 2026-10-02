@@ -246,6 +246,14 @@ def register_routes(app):
             raise HTTPException(status_code=400, detail=str(e))
         return {"path": normalized, "name": os.path.basename(normalized) or normalized}
 
+    @app.post("/workspace/dialog", summary="弹出系统目录选择框")
+    async def workspace_pick_dialog():
+        """后端弹原生目录选择框(任何前端宿主可用),返回所选路径或 null(取消)"""
+        import asyncio
+        from app.native_dialog import ask_directory
+        path = await asyncio.to_thread(ask_directory)
+        return {"path": path}
+
     @app.delete("/workspace", summary="关闭工作区")
     async def close_workspace():
         from app import workspace as ws_mod
@@ -1408,6 +1416,65 @@ def register_routes(app):
                 yield "data: [DONE]\n\n"
 
             return StreamingResponse(_analysis_generator(), media_type="text/event-stream")
+
+        # 智能体分支:工作区打开时,chat 意图升级为工具调用型 Agent(ZCode 式)
+        from app import workspace as ws_mod
+        current_workspace = ws_mod.get_current_workspace()
+        if intent == "chat" and current_workspace:
+            async def _agent_generator():
+                from app.agent_loop import stream_agent
+                final_answer = ""
+                try:
+                    yield f"data: {json.dumps({'type': 'meta', 'intent': 'agent', 'confidence': confidence, 'session_id': session_id}, ensure_ascii=False)}\n\n"
+
+                    history_convs = db.query(Conversation).filter(
+                        Conversation.user_id == current_user.id,
+                        Conversation.session_id == session_id,
+                        Conversation.module == "chat",
+                    ).order_by(Conversation.created_at.desc()).limit(10).all()
+                    history = []
+                    for conv in reversed(history_convs):
+                        try:
+                            answer = json.loads(conv.output_data).get("answer", "")
+                        except Exception:
+                            answer = ""
+                        history.append({"user": conv.input_text, "assistant": answer})
+
+                    async for event in stream_agent(
+                        workspace=current_workspace,
+                        user_message=effective_content,
+                        history=history,
+                        ai_config=ai_config,
+                        session_id=session_id,
+                        confidence=confidence,
+                    ):
+                        if event.get("type") == "answer":
+                            final_answer = (event.get("data") or {}).get("answer", "")
+                        yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                finally:
+                    chat_data = {
+                        "answer": final_answer,
+                        "references": [],
+                        "has_knowledge": request.use_rag,
+                        "agent": True,
+                    }
+                    conversation = Conversation(
+                        user_id=current_user.id,
+                        session_id=session_id,
+                        module="chat",
+                        input_text=request.content,
+                        output_data=json.dumps(chat_data, ensure_ascii=False),
+                    )
+                    db.add(conversation)
+                    _update_session_name(db, session_id, request.content)
+                    db.commit()
+                    try:
+                        yield f"data: {json.dumps({'type': 'done', 'data': chat_data, 'message': '智能体任务完成', 'conv_id': conversation.id}, ensure_ascii=False)}\n\n"
+                        yield "data: [DONE]\n\n"
+                    except Exception:
+                        pass
+
+            return StreamingResponse(_agent_generator(), media_type="text/event-stream")
 
         # 普通对话：流式调用 LLM
         client = build_plain_client(ai_config)
