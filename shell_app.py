@@ -17,6 +17,17 @@ APP_TITLE = "TestAssistant AI"
 WINDOW_SIZE = (1440, 900)
 
 
+def setup_browser_env():
+    """安装目录自带 browsers/ 时,让 Playwright 优先使用(用户机器无需装 Python/Chromium)"""
+    if getattr(sys, "frozen", False):
+        app_dir = os.path.dirname(sys.executable)
+    else:
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+    bundled = os.path.join(app_dir, "browsers")
+    if os.path.isdir(bundled):
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = bundled
+
+
 def backend_path() -> str:
     """后端 exe 与壳在同目录(同一 dist 文件夹)"""
     if getattr(sys, "frozen", False):
@@ -36,10 +47,11 @@ def wait_backend(timeout_seconds: int = 60) -> bool:
 
 
 def main():
+    setup_browser_env()
     backend = subprocess.Popen(
         [backend_path()],
         cwd=os.path.dirname(backend_path()),
-        # 隐藏后端控制台窗口(日志仍写入后端自身 stdout,被丢弃;排障时可直接运行 TestAssistant.exe)
+        # 继承壳的环境变量(含 PLAYWRIGHT_BROWSERS_PATH),隐藏后端控制台窗口
         creationflags=subprocess.CREATE_NO_WINDOW,
     )
     try:
