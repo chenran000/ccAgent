@@ -242,9 +242,10 @@ npm run build   # 产物输出 ../frontend/,由后端 / 直接服务
 - 测试用例生成结果为文本格式,非结构化用例表
 - 项目文件夹上传暂无前端界面(ZIP 上传走 API,或直接放入 test_project/ 目录)
 
-## 打包(exe, testAExe 分支)
+## 打包(exe 桌面版, testAExe 分支)
 
-- 构建: `build_exe.bat`(前端构建 → PyInstaller onedir → 拷贝 frontend 到 exe 旁);产物 `dist/testassistant/`
-- 代码/资产分层(对齐 ZCode): exe+_internal 为代码,`frontend/` 在 exe 旁,**用户数据固定 `~/.testassistant/`**(`TESTASSISTANT_STORAGE_DIR` 可重定向),升级替换 exe 不动数据
+- 构建: `build_exe.bat`(前端构建 → 后端 PyInstaller onedir → 桌面壳 onefile → 组装);产物 `dist/testassistant/`
+- **桌面形态**: `TestAssistantApp.exe`(pywebview/WebView2 独立窗口,~17MB)双击启动 → 拉起同目录 `TestAssistant.exe` 后端(隐藏控制台) → 就绪后窗口加载 UI → **关窗自动结束后端**;`控制台模式.bat` 为带日志的备用启动
+- 代码/资产分层(对齐 ZCode): 后端 onedir 为代码,`frontend/` 在 exe 旁,**用户数据固定 `~/.testassistant/`**(`TESTASSISTANT_STORAGE_DIR` 可重定向),升级替换文件不动数据
 - 浏览器依赖宿主机 Playwright Chromium(默认 `%LOCALAPPDATA%\ms-playwright`,随 `playwright install chromium` 安装)
 - 已知坑: 凭据加密的机器绑定含 hostname,**Docker 容器重建(换 hostname)会使已存 API Key 失效**,需重新配置或固定 `TESTASSISTANT_CREDENTIAL_SECRET`;Windows 桌面环境稳定
