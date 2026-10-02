@@ -15,6 +15,7 @@ DefaultDirName={autopf}\TestAssistant
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 ; 数据在 ~/.testassistant,卸载默认保留用户数据
+SetupIconFile=app_icon.ico
 UninstallDisplayIcon={app}\TestAssistantApp.exe
 OutputDir=dist
 OutputBaseFilename=TestAssistant-Setup

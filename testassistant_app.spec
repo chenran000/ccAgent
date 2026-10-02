@@ -51,6 +51,7 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,  # 窗口模式:无控制台黑窗
+    icon="app_icon.ico",
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

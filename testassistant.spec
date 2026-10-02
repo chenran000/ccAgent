@@ -79,6 +79,7 @@ exe = EXE(
     strip=False,
     upx=False,
     console=True,  # 控制台模式:日志可见,便于排障
+    icon="app_icon.ico",
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
