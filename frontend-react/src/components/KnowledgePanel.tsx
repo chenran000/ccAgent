@@ -1,12 +1,13 @@
 /** 知识库管理面板 */
-import { useCallback, useEffect, useState } from 'react';
-import { BookOpen, Loader2, Pencil, Plus, Search, Trash2 } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { BookOpen, Loader2, Pencil, Plus, Search, ShieldCheck, Trash2 } from 'lucide-react';
 import {
   addKnowledge,
   deleteKnowledge,
   getKnowledgeList,
   getKnowledgeStats,
   updateKnowledge,
+  uploadFile,
 } from '../lib/api';
 import type { KnowledgeDoc } from '../lib/types';
 
@@ -36,6 +37,9 @@ export default function KnowledgePanel({ onStatsChange }: KnowledgePanelProps) {
   useEffect(() => {
     load();
   }, [load]);
+
+  const standardsInputRef = useRef<HTMLInputElement>(null);
+  const [uploadingStandards, setUploadingStandards] = useState(false);
 
   const openAdd = () => {
     setEditingId(null);
@@ -108,6 +112,37 @@ export default function KnowledgePanel({ onStatsChange }: KnowledgePanelProps) {
             className="w-48 pl-8 pr-3 py-2 text-xs bg-gray-50 border border-gray-200 rounded-lg outline-none focus:border-blue-400 transition-colors"
           />
         </div>
+        <button
+          onClick={() => standardsInputRef.current?.click()}
+          disabled={uploadingStandards}
+          className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-white border border-gray-200 text-gray-700 text-xs font-medium hover:border-blue-300 hover:text-blue-700 transition-colors disabled:opacity-50"
+        >
+          {uploadingStandards
+            ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            : <ShieldCheck className="w-3.5 h-3.5" />}
+          上传规范文件
+        </button>
+        <input
+          ref={standardsInputRef}
+          type="file"
+          accept=".pdf,.txt,.md"
+          className="hidden"
+          onChange={async e => {
+            const file = e.target.files?.[0];
+            e.target.value = '';
+            if (!file) return;
+            setUploadingStandards(true);
+            try {
+              await uploadFile(file, 'standards');
+              await load();
+              onStatsChange();
+            } catch (err) {
+              window.alert(err instanceof Error ? err.message : '上传失败');
+            } finally {
+              setUploadingStandards(false);
+            }
+          }}
+        />
         <button
           onClick={openAdd}
           className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-blue-600 text-white text-xs font-medium hover:bg-blue-700 transition-colors"

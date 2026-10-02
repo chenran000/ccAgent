@@ -783,6 +783,7 @@ def register_routes(app):
     @app.post("/files/upload", summary="上传文件")
     async def upload_file(
         file: UploadFile = File(...),
+        category: str = Form("doc"),
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db),
     ):
@@ -818,7 +819,8 @@ def register_routes(app):
                     vector_db.add_document(
                         content=file_info["extracted_text"],
                         user_id=current_user.id,
-                        metadata={"source": file_info["original_filename"], "doc_id": str(doc.id)}
+                        metadata={"source": file_info["original_filename"], "doc_id": str(doc.id),
+                                  "category": category if category in ("doc", "standards") else "doc"}
                     )
                 except Exception as e:
                     logger.warning("知识库同步失败(文件已保存): %s", e)
@@ -1282,6 +1284,126 @@ def register_routes(app):
         metadata = request.metadata or {"updated": "true"}
         new_doc_id = vector_db.add_document(request.content, current_user.id, metadata)
         return {"doc_id": new_doc_id, "message": "更新成功"}
+
+    # ==================== 项目规范检查(inspector) ====================
+
+    @app.post("/inspect/stream", summary="全项目规范检查(SSE 实时进度)")
+    async def inspect_stream(
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        """规则引擎秒扫 + AI 分文件语义审查(规范文件注入),SSE 推进度与报告"""
+        import asyncio
+
+        from app import inspector, workspace as ws_mod
+
+        ws = ws_mod.get_current_workspace()
+        if not ws:
+            async def _no_ws():
+                yield f"data: {json.dumps({'type': 'error', 'message': '请先打开项目工作区'}, ensure_ascii=False)}\n\n"
+            return StreamingResponse(_no_ws(), media_type="text/event-stream")
+
+        ai_config = _get_user_ai_config(current_user.id, db)
+
+        def _dedupe(rule_issues: list, ai_issues: list) -> list:
+            """合并去重:AI 问题与规则问题同文件同行号时保留规则结果(确定性优先)"""
+            seen = {(i["file"], i["line"]) for i in rule_issues}
+            merged = list(rule_issues)
+            for issue in ai_issues:
+                if (issue["file"], issue["line"]) not in seen:
+                    merged.append(issue)
+            severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+            merged.sort(key=lambda i: severity_order.get(i["severity"], 9))
+            return merged
+
+        async def _generator():
+            step_no = 0
+
+            def sse(event: dict) -> str:
+                return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+            try:
+                # 1. 规则引擎(秒扫)
+                step_no += 1
+                yield sse({"type": "step", "step": step_no, "action": "rule_scan",
+                           "target": ws, "result": "规则引擎扫描中...", "success": True})
+                rule_issues = await asyncio.to_thread(inspector.rule_scan, ws)
+                for issue in rule_issues:
+                    if issue["severity"] in ("critical", "high"):
+                        yield sse({"type": "step", "step": step_no, "action": f"rule:{issue['rule_id']}",
+                                   "target": f"{issue['file']}:{issue['line']}",
+                                   "result": issue["message"], "success": False})
+
+                # 2. AI 语义审查(分文件;未配模型则跳过)
+                ai_issues: list = []
+                ai_files = 0
+                if (ai_config or {}).get("api_key"):
+                    standards = await asyncio.to_thread(inspector.load_standards_text, current_user.id)
+                    candidates = await asyncio.to_thread(inspector.collect_code_files, ws)
+                    for i, item in enumerate(candidates, 1):
+                        def _read_and_review(item=item):
+                            try:
+                                code = Path(item["path"]).read_text(encoding="utf-8")
+                            except Exception:
+                                return []
+                            return inspector.ai_review_file(ai_config, item["rel"], code, standards)
+                        found = await asyncio.to_thread(_read_and_review)
+                        ai_files += 1
+                        ai_issues.extend(found)
+                        yield sse({"type": "step", "step": step_no,
+                                   "action": f"ai_review ({i}/{len(candidates)})",
+                                   "target": item["rel"],
+                                   "result": f"发现 {len(found)} 个问题" if found else "未发现问题",
+                                   "success": True})
+                else:
+                    yield sse({"type": "step", "step": step_no, "action": "ai_review",
+                               "target": "skipped", "result": "未配置AI模型,仅完成规则扫描", "success": False})
+
+                # 3. 汇总报告
+                all_issues = _dedupe(rule_issues, ai_issues)
+                report = {
+                    "workspace": ws,
+                    "created_at": datetime.now().isoformat(timespec="seconds"),
+                    "score": inspector.health_score(all_issues),
+                    "total": len(all_issues),
+                    "by_severity": {
+                        s: sum(1 for i in all_issues if i["severity"] == s)
+                        for s in ("critical", "high", "medium", "low")
+                    },
+                    "ai_files": ai_files,
+                    "rule_count": len(rule_issues),
+                    "ai_count": len(ai_issues),
+                    "issues": all_issues[:200],
+                }
+                saved = await asyncio.to_thread(inspector.save_report, ws, report)
+                report["saved_to"] = saved
+                yield sse({"type": "report", "data": report, "message": f"检查完成,健康分 {report['score']}"})
+                yield "data: [DONE]\n\n"
+            except Exception as e:
+                logger.exception("规范检查失败")
+                yield sse({"type": "error", "message": f"检查失败: {e}"})
+                yield "data: [DONE]\n\n"
+
+        return StreamingResponse(_generator(), media_type="text/event-stream")
+
+    @app.get("/inspect/reports", summary="历史检查报告列表")
+    async def inspect_reports(current_user: User = Depends(get_current_user)):
+        from app import inspector, workspace as ws_mod
+        ws = ws_mod.get_current_workspace()
+        if not ws:
+            return {"reports": []}
+        return {"reports": inspector.list_reports(ws)}
+
+    @app.get("/inspect/report", summary="读取检查报告详情")
+    async def inspect_report(name: str, current_user: User = Depends(get_current_user)):
+        from app import inspector, workspace as ws_mod
+        ws = ws_mod.get_current_workspace()
+        if not ws:
+            raise HTTPException(status_code=400, detail="未打开工作区")
+        data = inspector.load_report(ws, name)
+        if not data:
+            raise HTTPException(status_code=404, detail="报告不存在")
+        return data
 
     # ==================== 统一对话接口（SSE 流式） ====================
 

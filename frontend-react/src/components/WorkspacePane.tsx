@@ -1,14 +1,18 @@
-/** 工作区组件:顶栏(当前项目路径 + 打开/关闭) + 右侧文件树(ZCode 式工作区交互) */
+/** 工作区组件:顶栏(当前项目路径 + 打开/关闭) + 右侧面板(项目文件/检查报告双 Tab,ZCode 式) */
 import { useCallback, useEffect, useState } from 'react';
-import { FolderOpen, FolderClosed, File as FileIcon, X } from 'lucide-react';
+import { FolderOpen, FolderClosed, File as FileIcon, ListChecks, Loader2, ShieldCheck, X } from 'lucide-react';
 import {
   closeWorkspace,
+  getReport,
   getWorkspace,
   getWorkspaceTree,
+  listReports,
   openWorkspace,
   selectFolder,
+  streamInspect,
 } from '../lib/api';
 import type { FileNode } from '../lib/types';
+import type { ReportSummary } from '../lib/api';
 
 export function useWorkspace() {
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
@@ -130,31 +134,238 @@ export function WorkspaceFilesPane({ workspacePath, tree, expanded, toggle, onOp
   toggle: (path: string) => void;
   onOpen: () => void;
 }) {
+  const [tab, setTab] = useState<'files' | 'inspect'>('files');
+
+  const tabs = (
+    <div className="h-9 shrink-0 flex items-center gap-1 px-2 border-b border-border">
+      {(['files', 'inspect'] as const).map(t => (
+        <button
+          key={t}
+          onClick={() => setTab(t)}
+          className={`flex items-center gap-1 px-2 py-1 rounded-md text-xs transition-colors ${
+            tab === t ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-400 hover:text-gray-600'
+          }`}
+        >
+          {t === 'files' ? <FolderClosed className="w-3.5 h-3.5" /> : <ListChecks className="w-3.5 h-3.5" />}
+          {t === 'files' ? '项目文件' : '检查报告'}
+        </button>
+      ))}
+    </div>
+  );
+
   if (!workspacePath) {
     return (
-      <div className="w-64 shrink-0 border-l border-border bg-white flex flex-col items-center justify-center gap-3 px-4">
-        <FolderOpen className="w-8 h-8 text-gray-300" />
-        <p className="text-xs text-gray-400 text-center">未打开项目</p>
-        <button
-          onClick={onOpen}
-          className="text-xs text-blue-600 hover:text-blue-700 font-medium"
-        >
-          打开项目文件夹
-        </button>
+      <div className="w-64 shrink-0 border-l border-border bg-white flex flex-col">
+        {tabs}
+        <div className="flex-1 flex flex-col items-center justify-center gap-3 px-4">
+          <FolderOpen className="w-8 h-8 text-gray-300" />
+          <p className="text-xs text-gray-400 text-center">未打开项目</p>
+          <button
+            onClick={onOpen}
+            className="text-xs text-blue-600 hover:text-blue-700 font-medium"
+          >
+            打开项目文件夹
+          </button>
+        </div>
       </div>
     );
   }
+
   return (
     <div className="w-64 shrink-0 border-l border-border bg-white flex flex-col">
-      <div className="h-9 shrink-0 flex items-center px-3 border-b border-border">
-        <span className="text-xs font-medium text-gray-400">项目文件</span>
+      {tabs}
+      {tab === 'files' ? (
+        <div className="flex-1 min-h-0 overflow-y-auto scrollbar-thin py-1">
+          {tree.length === 0
+            ? <div className="px-3 py-4 text-xs text-gray-400">空目录</div>
+            : tree.map(node => (
+              <TreeItem key={node.path} node={node} depth={0} expanded={expanded} toggle={toggle} />
+            ))}
+        </div>
+      ) : (
+        <WorkspaceInspectPane workspacePath={workspacePath} onOpen={onOpen} />
+      )}
+    </div>
+  );
+}
+
+
+// ========== 检查报告 Tab ==========
+interface ReportData {
+  workspace?: string;
+  created_at?: string;
+  score?: number;
+  total?: number;
+  by_severity?: Record<string, number>;
+  ai_files?: number;
+  rule_count?: number;
+  ai_count?: number;
+  issues?: {
+    severity: string;
+    source: string;
+    file: string;
+    line: number;
+    message: string;
+    evidence: string;
+    suggestion: string;
+    rule_id: string;
+  }[];
+}
+
+const SEVERITY_STYLE: Record<string, string> = {
+  critical: 'bg-red-100 text-red-700',
+  high: 'bg-orange-100 text-orange-700',
+  medium: 'bg-amber-100 text-amber-700',
+  low: 'bg-gray-100 text-gray-600',
+};
+
+function ReportView({ report }: { report: ReportData }) {
+  const sev = report.by_severity || {};
+  return (
+    <div className="space-y-3 p-3">
+      <div className="flex items-center gap-3">
+        <div className={`text-2xl font-bold ${  (report.score ?? 0) >= 80 ? 'text-green-600' : (report.score ?? 0) >= 50 ? 'text-amber-600' : 'text-red-600'}`}>
+          {report.score ?? '-'}
+        </div>
+        <div className="text-xs text-gray-500">
+          <div>健康分</div>
+          <div>共 {report.total ?? 0} 个问题</div>
+        </div>
       </div>
-      <div className="flex-1 min-h-0 overflow-y-auto scrollbar-thin py-1">
-        {tree.length === 0
-          ? <div className="px-3 py-4 text-xs text-gray-400">空目录</div>
-          : tree.map(node => (
-            <TreeItem key={node.path} node={node} depth={0} expanded={expanded} toggle={toggle} />
-          ))}
+      <div className="flex gap-1.5 text-xs">
+        {(['critical', 'high', 'medium', 'low'] as const).map(s => (
+          <span key={s} className={`px-2 py-0.5 rounded-full ${SEVERITY_STYLE[s]}`}>{s} {sev[s] || 0}</span>
+        ))}
+      </div>
+      <div className="text-[11px] text-gray-400">
+        规则引擎 {report.rule_count ?? 0} 项 · AI 审查 {report.ai_files ?? 0} 个文件/{report.ai_count ?? 0} 项
+      </div>
+      <div className="space-y-2">
+        {(report.issues || []).slice(0, 60).map((issue, i) => (
+          <div key={i} className="rounded-lg border border-gray-200 bg-white px-2.5 py-2 text-xs">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className={`px-1.5 py-0.5 rounded ${SEVERITY_STYLE[issue.severity] || SEVERITY_STYLE.low}`}>{issue.severity}</span>
+              <span className="font-mono text-[11px] text-gray-500 truncate">{issue.file}:{issue.line}</span>
+              <span className="text-[10px] text-gray-300 font-mono">{issue.rule_id}</span>
+            </div>
+            <div className="mt-1 text-gray-700">{issue.message}</div>
+            {issue.evidence && <div className="mt-0.5 font-mono text-[11px] text-gray-400 break-all line-clamp-2">{issue.evidence}</div>}
+            {issue.suggestion && <div className="mt-0.5 text-blue-700">建议: {issue.suggestion}</div>}
+          </div>
+        ))}
+        {(report.issues?.length || 0) > 60 && (
+          <div className="text-xs text-gray-400 text-center">仅显示前 60 条,完整报告见导出文件</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function WorkspaceInspectPane({ workspacePath, onOpen }: {
+  workspacePath: string | null;
+  onOpen: () => void;
+}) {
+  const [running, setRunning] = useState(false);
+  const [steps, setSteps] = useState<{ action: string; target: string; result: string; success: boolean }[]>([]);
+  const [report, setReport] = useState<ReportData | null>(null);
+  const [history, setHistory] = useState<ReportSummary[]>([]);
+  const [error, setError] = useState('');
+
+  const loadHistory = useCallback(async () => {
+    if (!workspacePath) return setHistory([]);
+    try {
+      const { reports } = await listReports();
+      setHistory(reports);
+    } catch { /* ignore */ }
+  }, [workspacePath]);
+
+  useEffect(() => { setReport(null); setSteps([]); setError(''); loadHistory(); }, [workspacePath, loadHistory]);
+
+  const run = useCallback(async () => {
+    setRunning(true); setSteps([]); setReport(null); setError('');
+    try {
+      await streamInspect(ev => {
+        if (ev.type === 'step') {
+          setSteps(prev => [...prev, {
+            action: String(ev.action ?? ''),
+            target: String(ev.target ?? ''),
+            result: String(ev.result ?? ''),
+            success: ev.success !== false,
+          }]);
+        } else if (ev.type === 'report') {
+          setReport(ev.data as ReportData);
+          loadHistory();
+        } else if (ev.type === 'error') {
+          setError(String(ev.message ?? '检查失败'));
+        }
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '检查失败');
+    } finally {
+      setRunning(false);
+    }
+  }, [loadHistory]);
+
+  const openSaved = useCallback(async (name: string) => {
+    try {
+      const data = await getReport(name);
+      setReport(data as ReportData);
+    } catch { /* ignore */ }
+  }, []);
+
+  if (!workspacePath) {
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center gap-3 text-center px-4">
+        <ShieldCheck className="w-8 h-8 text-gray-300" />
+        <p className="text-xs text-gray-400">打开项目后可运行规范检查</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex-1 min-h-0 flex flex-col">
+      <div className="p-3 space-y-2">
+        <button
+          onClick={run}
+          disabled={running}
+          className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-blue-600 text-white text-xs font-medium hover:bg-blue-700 transition-colors disabled:opacity-50"
+        >
+          {running ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ShieldCheck className="w-3.5 h-3.5" />}
+          {running ? '检查中...' : '运行规范检查'}
+        </button>
+        {error && <div className="text-xs text-red-500">{error}</div>}
+      </div>
+      <div className="flex-1 min-h-0 overflow-y-auto scrollbar-thin">
+        {running && steps.length > 0 && (
+          <div className="px-3 pb-3 space-y-1">
+            {steps.slice(-8).map((s, i) => (
+              <div key={i} className="rounded border border-gray-100 bg-gray-50 px-2 py-1 text-[11px]">
+                <span className={`inline-block w-1.5 h-1.5 rounded-full mr-1.5 ${s.success ? 'bg-green-500' : 'bg-red-500'}`} />
+                <span className="font-mono text-blue-700">{s.action}</span>
+                <span className="text-gray-400 font-mono ml-1 truncate">{s.target}</span>
+                <div className="text-gray-500 truncate">{s.result}</div>
+              </div>
+            ))}
+          </div>
+        )}
+        {report && <ReportView report={report} />}
+        {!report && history.length > 0 && (
+          <div className="px-3 pb-4">
+            <div className="text-xs font-medium text-gray-400 mb-1.5">历史报告</div>
+            <div className="space-y-1">
+              {history.map(h => (
+                <button
+                  key={h.name}
+                  onClick={() => openSaved(h.name)}
+                  className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg border border-gray-100 bg-white text-xs hover:border-blue-300 transition-colors"
+                >
+                  <span className="text-gray-600">{h.created_at?.replace('T', ' ')}</span>
+                  <span className={`font-semibold ${(h.score ?? 0) >= 80 ? 'text-green-600' : (h.score ?? 0) >= 50 ? 'text-amber-600' : 'text-red-600'}`}>{h.score ?? '-'}分</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

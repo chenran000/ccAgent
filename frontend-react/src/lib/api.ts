@@ -151,11 +151,50 @@ export const testAIConnection = (p: { api_key: string; api_base_url: string; cha
   apiJson<{ success: boolean; message: string }>('/settings/ai/test', { method: 'POST', body: JSON.stringify(p) });
 
 // ========== 文件 ==========
-export async function uploadFile(file: File): Promise<FileInfo> {
+export async function uploadFile(file: File, category: 'doc' | 'standards' = 'doc'): Promise<FileInfo> {
   const fd = new FormData();
   fd.append('file', file);
+  fd.append('category', category);
   return apiJson<FileInfo>('/files/upload', { method: 'POST', body: fd });
 }
+
+// ========== 规范检查 ==========
+export type InspectEvent = { type: string; [key: string]: unknown };
+
+/** POST SSE 规范检查:解析 data 行,逐事件回调 */
+export async function streamInspect(onEvent: (ev: InspectEvent) => void, signal?: AbortSignal): Promise<void> {
+  const res = await request('/inspect/stream', { method: 'POST', signal });
+  if (!res.ok || !res.body) throw new Error(`请求失败 (HTTP ${res.status})`);
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) continue;
+      const payload = trimmed.slice(5).trim();
+      if (!payload || payload === '[DONE]') continue;
+      try { onEvent(JSON.parse(payload)); } catch { /* 忽略解析失败 */ }
+    }
+  }
+}
+
+export interface ReportSummary {
+  name: string;
+  created_at: string;
+  score?: number;
+  total?: number;
+  by_severity?: Record<string, number>;
+  ai_files?: number;
+}
+
+export const listReports = () => apiJson<{ reports: ReportSummary[] }>('/inspect/reports');
+export const getReport = (name: string) => apiJson<Record<string, unknown>>(`/inspect/report?name=${encodeURIComponent(name)}`);
 
 // ========== 测试 Agent ==========
 export const confirmFix = (taskId: string, issueIndex: number, confirmed: boolean) =>
