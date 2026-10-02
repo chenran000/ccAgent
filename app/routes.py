@@ -227,6 +227,55 @@ def register_routes(app):
     # 单用户本地版:已移除 /auth/register|login|me 接口,鉴权依赖 get_current_user
     # 返回内置本地用户(app/auth.py)
 
+    # ==================== 工作区接口(ZCode 式:打开本地项目文件夹) ====================
+
+    @app.get("/workspace", summary="获取当前工作区")
+    async def get_workspace():
+        """当前打开的项目文件夹;未打开或已失效返回 null"""
+        from app import workspace as ws_mod
+        return {"path": ws_mod.get_current_workspace()}
+
+    @app.post("/workspace", summary="打开(设置)工作区")
+    async def set_workspace(request: dict):
+        """设置本地项目文件夹为当前工作区,后续检查/修复/文件操作以它为根"""
+        from app import workspace as ws_mod
+        path = (request or {}).get("path", "")
+        try:
+            normalized = ws_mod.set_current_workspace(path)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return {"path": normalized, "name": os.path.basename(normalized) or normalized}
+
+    @app.delete("/workspace", summary="关闭工作区")
+    async def close_workspace():
+        from app import workspace as ws_mod
+        ws_mod.clear_workspace()
+        return {"message": "工作区已关闭"}
+
+    @app.get("/workspace/files", summary="工作区文件树")
+    async def get_workspace_files():
+        """当前工作区的文件树(忽略依赖/构建产物目录,限 2000 项)"""
+        from app import workspace as ws_mod
+        ws = ws_mod.get_current_workspace()
+        if not ws:
+            raise HTTPException(status_code=400, detail="未打开工作区")
+        return {"path": ws, "tree": ws_mod.build_file_tree(ws)}
+
+    @app.get("/workspace/file", summary="查看工作区文件内容")
+    async def get_workspace_file(path: str):
+        """读取工作区内文件(路径围栏限制在工作区内部)"""
+        from app import workspace as ws_mod
+        from app.file_viewer import read_file_content
+        ws = ws_mod.get_current_workspace()
+        if not ws:
+            raise HTTPException(status_code=400, detail="未打开工作区")
+        if not ws_mod.is_within_workspace(path):
+            raise HTTPException(status_code=403, detail="路径不在工作区内")
+        if not os.path.isfile(path):
+            raise HTTPException(status_code=404, detail="文件不存在")
+        info = read_file_content(path)
+        return {"path": path, **info}
+
     # ==================== 会话管理接口 ====================
 
     @app.get("/sessions", response_model=SessionListResponse)

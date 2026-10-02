@@ -4,11 +4,13 @@ import ChatPanel from './ChatPanel';
 import KnowledgePanel from './KnowledgePanel';
 import ModelPanel from './ModelPanel';
 import Sidebar, { type MainView } from './Sidebar';
+import { WorkspaceFilesPane, WorkspaceHeader, useWorkspace } from './WorkspacePane';
 import { createSession, deleteSession, getKnowledgeStats, listSessions, renameSession } from '../lib/api';
 import type { SessionInfo } from '../lib/types';
 
 export default function IDELayout() {
   const [view, setView] = useState<MainView>('chat');
+  const workspace = useWorkspace();
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string>(
     () => localStorage.getItem('lastSessionId') || '',
@@ -112,19 +114,34 @@ export default function IDELayout() {
       />
 
       <main className="flex-1 min-w-0 h-full flex flex-col bg-gray-50">
-        {/* 聊天视图常驻挂载(切视图不丢对话状态) */}
-        <div className={view === 'chat' ? 'flex-1 min-h-0 flex flex-col' : 'hidden'}>
-          {currentSessionId ? (
-            <ChatPanel
-              currentSessionId={currentSessionId}
-              onSessionsChanged={refreshSessions}
-              onKnowledgeAdded={loadKnowledgeStats}
-            />
-          ) : (
-            <div className="flex-1 flex items-center justify-center text-sm text-gray-400">
-              正在准备会话...
-            </div>
-          )}
+        {/* 工作区顶栏(ZCode 式:项目路径 + 打开/关闭) */}
+        <WorkspaceHeader
+          workspacePath={workspace.workspacePath}
+          onOpen={workspace.open}
+          onClose={workspace.close}
+        />
+        {/* 聊天视图常驻挂载(切视图不丢对话状态);右侧项目文件面板仅聊天视图显示 */}
+        <div className={view === 'chat' ? 'flex-1 min-h-0 flex flex-row' : 'hidden'}>
+          <div className="flex-1 min-w-0 flex flex-col">
+            {currentSessionId ? (
+              <ChatPanel
+                currentSessionId={currentSessionId}
+                onSessionsChanged={refreshSessions}
+                onKnowledgeAdded={loadKnowledgeStats}
+              />
+            ) : (
+              <div className="flex-1 flex items-center justify-center text-sm text-gray-400">
+                正在准备会话...
+              </div>
+            )}
+          </div>
+          <WorkspaceFilesPane
+            workspacePath={workspace.workspacePath}
+            tree={workspace.tree}
+            expanded={workspace.expanded}
+            toggle={workspace.toggle}
+            onOpen={workspace.open}
+          />
         </div>
         {view === 'knowledge' && <KnowledgePanel onStatsChange={loadKnowledgeStats} />}
         {view === 'models' && <ModelPanel />}

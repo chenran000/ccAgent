@@ -140,3 +140,12 @@ export function emptyTestRun(): TestRunState {
     results: [],
   };
 }
+
+// ========== 工作区 ==========
+export interface FileNode {
+  name: string;
+  path: string;
+  type: 'file' | 'directory';
+  size?: number;
+  children?: FileNode[];
+}

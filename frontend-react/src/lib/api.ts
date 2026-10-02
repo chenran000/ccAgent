@@ -4,6 +4,7 @@ import type {
   ActiveModel,
   ChatStreamEvent,
   ConversationRecord,
+  FileNode,
   FileInfo,
   FixResult,
   KnowledgeDoc,
@@ -165,3 +166,28 @@ export const confirmFix = (taskId: string, issueIndex: number, confirmed: boolea
 
 export const stopTest = (taskId: string) =>
   apiJson<{ success: boolean; message: string }>(`/test/stop/${taskId}`, { method: 'POST' });
+
+// ========== 工作区(ZCode 式:打开本地项目文件夹) ==========
+export const getWorkspace = () => apiJson<{ path: string | null }>('/workspace');
+export const openWorkspace = (path: string) =>
+  apiJson<{ path: string; name: string }>('/workspace', { method: 'POST', body: JSON.stringify({ path }) });
+export const closeWorkspace = () => apiJson<{ message: string }>('/workspace', { method: 'DELETE' });
+export const getWorkspaceTree = () => apiJson<{ path: string; tree: FileNode[] }>('/workspace/files');
+export const getWorkspaceFile = (path: string) =>
+  apiJson<{ path: string; content: string; content_type: string; language: string; is_binary: boolean }>(
+    `/workspace/file?path=${encodeURIComponent(path)}`,
+  );
+
+/** 选择本地文件夹:桌面壳走原生对话框;浏览器环境回退手动输入路径 */
+export async function selectFolder(): Promise<string | null> {
+  const bridge = (window as unknown as {
+    pywebview?: { api?: { selectFolder?: () => Promise<string | string[] | null> } };
+  }).pywebview;
+  if (bridge?.api?.selectFolder) {
+    const result = await bridge.api.selectFolder();
+    if (Array.isArray(result)) return result[0] || null;
+    return result || null;
+  }
+  const manual = window.prompt('输入项目文件夹的完整路径(桌面版支持原生选择):');
+  return manual && manual.trim() ? manual.trim() : null;
+}

@@ -17,6 +17,23 @@ APP_TITLE = "TestAssistant AI"
 WINDOW_SIZE = (1440, 900)
 
 
+class JsApi:
+    """暴露给前端 window.pywebview.api 的原生能力桥"""
+
+    def select_folder(self):
+        """原生对话框选择文件夹,返回路径或 None(前端用于'打开本地项目')"""
+        windows = webview.windows
+        if not windows:
+            return None
+        result = windows[0].create_file_dialog(webview.FOLDER_DIALOG)
+        if isinstance(result, (list, tuple)):
+            return result[0] if result else None
+        return result
+
+
+api = JsApi()
+
+
 def setup_browser_env():
     """安装目录自带 browsers/ 时,让 Playwright 优先使用(用户机器无需装 Python/Chromium)"""
     if getattr(sys, "frozen", False):
@@ -62,16 +79,19 @@ def main():
                 width=520,
                 height=160,
                 resizable=False,
+                js_api=api,
             )
             webview.start()
             return
 
+        # js_api 属于 create_window(pywebview 5.x),前端通过 window.pywebview.api 调用
         webview.create_window(
             APP_TITLE,
             BACKEND_URL,
             width=WINDOW_SIZE[0],
             height=WINDOW_SIZE[1],
             min_size=(1024, 640),
+            js_api=api,
         )
         webview.start()  # 阻塞直到窗口关闭
     finally:
