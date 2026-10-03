@@ -1,9 +1,8 @@
-/** 聊天面板:消息流渲染 + SSE 发送 + 测试运行卡片 + 文件引用 */
+/** 聊天面板:消息流渲染 + SSE 发送 + 文件引用 */
 import { useEffect, useRef, useState } from 'react';
 import {
   BookOpen,
   Bug,
-  Eye,
   FileText,
   ListChecks,
   Loader2,
@@ -19,18 +18,12 @@ import {
   uploadFile,
 } from '../lib/api';
 import {
-  emptyTestRun,
   type AgentStep,
   type ChatMessage,
   type ChatStreamEvent,
-  type CodeIssue,
   type ConversationRecord,
   type FileInfo,
-  type TestRunState,
-  type TestStep,
-  type TestRunStatus,
 } from '../lib/types';
-import TestRunCard from './TestRunCard';
 
 interface ChatPanelProps {
   currentSessionId: string;
@@ -58,10 +51,10 @@ const SAMPLES_AGENT = [
   { icon: BookOpen, text: '帮我给核心模块补充单元测试' },
 ];
 const SAMPLES = [
-  { icon: Bug, text: '帮我测试 http://localhost:5000 的登录功能' },
-  { icon: ListChecks, text: '为登录功能生成测试用例' },
-  { icon: BookOpen, text: '记住：登录接口超时时间为 30 秒' },
-  { icon: Sparkles, text: '分析这个 bug：点击提交按钮后页面无响应' },
+  { icon: Bug, text: '分析这个 bug：点击提交按钮后页面无响应' },
+  { icon: ListChecks, text: '为登录功能设计一份测试用例' },
+  { icon: BookOpen, text: '什么是边界值分析和等价类划分？' },
+  { icon: Sparkles, text: '帮我写一个 Python 快速排序实现' },
 ];
 
 // ---------- 历史记录映射 ----------
@@ -185,7 +178,6 @@ export default function ChatPanel({ workspacePath, ...props }: ChatPanelProps) {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [useRag, setUseRag] = useState(false);
-  const [useVision, setUseVision] = useState(false);
   const [attachedFile, setAttachedFile] = useState<FileInfo | null>(null);
   const [uploading, setUploading] = useState(false);
   const [inputError, setInputError] = useState('');
@@ -224,14 +216,8 @@ export default function ChatPanel({ workspacePath, ...props }: ChatPanelProps) {
   const applyEvent = (id: string, ev: ChatStreamEvent) => {
     patchMessage(id, m => {
       switch (ev.type) {
-        case 'meta': {
-          const intent = asString(ev.intent, 'chat');
-          return {
-            ...m,
-            module: intent,
-            testRun: intent === 'web_test' ? emptyTestRun() : m.testRun,
-          };
-        }
+        case 'meta':
+          return { ...m, module: asString(ev.intent, 'chat') };
         case 'chunk':
           return { ...m, text: m.text + asString(ev.content) };
         case 'result':
@@ -241,88 +227,20 @@ export default function ChatPanel({ workspacePath, ...props }: ChatPanelProps) {
             data: asRecord(ev.data),
             pending: false,
           };
-        case 'start': {
-          const run = m.testRun ?? emptyTestRun();
-          return {
-            ...m,
-            module: 'web_test',
-            testRun: {
-              ...run,
-              taskId: asString(ev.task_id, run.taskId || ''),
-              url: asString(ev.url) || run.url,
-              status: 'running',
-              message: asString(ev.message),
-            },
-          };
-        }
         case 'step': {
-          // 智能体的工具步骤内联渲染;web_test 的测试步骤进 testRun 卡片
-          if (m.module === 'agent') {
-            const step: AgentStep = {
-              step: Number(ev.step) || (m.agentSteps?.length ?? 0) + 1,
-              action: asString(ev.action),
-              target: asString(ev.target),
-              result: asString(ev.result),
-              success: ev.success !== false,
-            };
-            return { ...m, agentSteps: [...(m.agentSteps ?? []), step] };
-          }
-          const run = m.testRun ?? emptyTestRun();
-          const step: TestStep = {
-            step: Number(ev.step) || run.steps.length + 1,
+          // 智能体的工具步骤内联渲染
+          const step: AgentStep = {
+            step: Number(ev.step) || (m.agentSteps?.length ?? 0) + 1,
             action: asString(ev.action),
             target: asString(ev.target),
             result: asString(ev.result),
             success: ev.success !== false,
-            console_errors: asArray<string>(ev.console_errors),
-            network_errors: asArray<string>(ev.network_errors),
           };
-          return { ...m, testRun: { ...run, steps: [...run.steps, step] } };
+          return { ...m, agentSteps: [...(m.agentSteps ?? []), step] };
         }
-        case 'code_issue': {
-          const run = m.testRun ?? emptyTestRun();
-          const issue = asRecord(ev.issue) as unknown as CodeIssue | undefined;
-          if (!issue) return m;
-          if (run.issues.some(i => i.file_path === issue.file_path && i.error_log === issue.error_log)) {
-            return m;
-          }
-          return { ...m, testRun: { ...run, issues: [...run.issues, issue] } };
-        }
-        case 'waiting_confirm':
-          return { ...m, testRun: { ...(m.testRun ?? emptyTestRun()), status: 'awaiting_confirm' } };
-        case 'cancelled':
-          return {
-            ...m,
-            pending: false,
-            testRun: { ...(m.testRun ?? emptyTestRun()), status: 'cancelled', message: asString(ev.message, '测试已停止') },
-          };
         case 'error':
           return { ...m, pending: false, error: asString(ev.message, '请求失败') };
         case 'done': {
-          if (m.testRun) {
-            const run = m.testRun;
-            const issues = asArray<CodeIssue>(ev.code_issues);
-            const status = asString(ev.status);
-            const finalStatus: TestRunStatus =
-              status === 'awaiting_fix' ? 'awaiting_confirm'
-              : status === 'cancelled' ? 'cancelled'
-              : status === 'failed' ? 'failed'
-              : 'completed';
-            return {
-              ...m,
-              pending: false,
-              testRun: {
-                ...run,
-                issues: issues.length ? issues : run.issues,
-                status: run.status === 'awaiting_confirm' && finalStatus === 'completed'
-                  ? 'awaiting_confirm'
-                  : finalStatus,
-                message: asString(ev.message, run.message),
-                scriptPath: asString(ev.script_path) || run.scriptPath,
-                reportPath: asString(ev.report_path) || run.reportPath,
-              },
-            };
-          }
           const data = asRecord(ev.data) as { references?: string[] } | undefined;
           return {
             ...m,
@@ -369,7 +287,7 @@ export default function ChatPanel({ workspacePath, ...props }: ChatPanelProps) {
     try {
       await streamSSE(
         '/chat/stream',
-        { content, session_id: props.currentSessionId, use_rag: useRag, file_id: fileId, use_vision: useVision || undefined },
+        { content, session_id: props.currentSessionId, use_rag: useRag, file_id: fileId },
         ev => applyEvent(assistantId, ev),
         controller.signal,
       );
@@ -432,18 +350,6 @@ export default function ChatPanel({ workspacePath, ...props }: ChatPanelProps) {
             )}
           </div>
         </div>
-      );
-    }
-    if (m.module === 'web_test' && m.testRun) {
-      return (
-        <TestRunCard
-          run={m.testRun}
-          onUpdate={mutate =>
-            patchMessage(m.id, msg =>
-              msg.testRun ? { ...msg, testRun: mutate(msg.testRun) } : msg,
-            )
-          }
-        />
       );
     }
     if (m.data) {
@@ -573,18 +479,6 @@ export default function ChatPanel({ workspacePath, ...props }: ChatPanelProps) {
             >
               <BookOpen className="w-4 h-4" />
               知识库
-            </button>
-            <button
-              onClick={() => setUseVision(v => !v)}
-              className={`flex items-center gap-1 px-2.5 py-2 rounded-xl text-xs transition-colors ${
-                useVision
-                  ? 'bg-blue-50 text-blue-700 font-medium'
-                  : 'text-gray-400 hover:text-blue-600 hover:bg-blue-50'
-              }`}
-              title="开启后测试任务携带页面截图(可发现视觉类问题,成本更高);关闭时使用 DOM 文本感知"
-            >
-              <Eye className="w-4 h-4" />
-              视觉
             </button>
             <textarea
               value={input}

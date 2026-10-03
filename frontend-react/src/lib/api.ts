@@ -6,7 +6,6 @@ import type {
   ConversationRecord,
   FileNode,
   FileInfo,
-  FixResult,
   KnowledgeDoc,
   KnowledgeStats,
   ModelConfigInfo,
@@ -195,16 +194,6 @@ export interface ReportSummary {
 
 export const listReports = () => apiJson<{ reports: ReportSummary[] }>('/inspect/reports');
 export const getReport = (name: string) => apiJson<Record<string, unknown>>(`/inspect/report?name=${encodeURIComponent(name)}`);
-
-// ========== 测试 Agent ==========
-export const confirmFix = (taskId: string, issueIndex: number, confirmed: boolean) =>
-  apiJson<{ fix_result: FixResult }>('/test/code/fix', {
-    method: 'POST',
-    body: JSON.stringify({ task_id: taskId, issue_index: issueIndex, confirmed }),
-  });
-
-export const stopTest = (taskId: string) =>
-  apiJson<{ success: boolean; message: string }>(`/test/stop/${taskId}`, { method: 'POST' });
 
 // ========== 工作区(ZCode 式:打开本地项目文件夹) ==========
 export const getWorkspace = () => apiJson<{ path: string | null }>('/workspace');

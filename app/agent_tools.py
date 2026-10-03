@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any, Dict
 
 from app import workspace as ws_mod
-from app.config import TEST_PROJECT_DIR
 
 logger = logging.getLogger(__name__)
 

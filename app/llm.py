@@ -6,70 +6,21 @@
   兼容 DeepSeek/通义/Kimi/智谱/自定义等平台对函数调用支持不一的情况
 """
 import re
-from typing import List, Optional, Type, TypeVar
+from typing import List, Type, TypeVar
 
 import instructor
 import openai
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ValidationError
 
 T = TypeVar("T", bound=BaseModel)
 
 _DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
 
-# ========== 结构化输出契约(与 prompts.py 中的提示词输出格式一一对应) ==========
-
-class TestStepDecision(BaseModel):
-    """Web 测试 Agent 单步操作决策(TEST_AGENT_PROMPT 的输出契约)"""
-    action: str = Field(default="done", description="操作类型:click/fill/navigate/wait/press/assert/assert_text/assert_url/extract_value/scroll/done")
-    target: str = ""
-    text: str = ""
-    url: str = ""
-    key: str = "Enter"
-    name: str = ""
-    wait_time: int = 1000
-    success: bool = True
-    message: str = ""
-    reason: str = ""
-    analyze_code: bool = False
-
-
-class CodeIssueAnalysis(BaseModel):
-    """浏览器错误定位到项目代码的结果(CODE_ANALYSIS_WEB_PROMPT 的输出契约)"""
-    file_path: str = ""
-    line_number: int = 0
-    issue_description: str = ""
-    suggested_fix: str = ""
-    code_snippet: Optional[str] = None
-    severity: str = "error"
-
-
-class CodeFixResult(BaseModel):
-    """代码修复结果(CODE_FIX_PROMPT 的输出契约)"""
-    fix_description: str = ""
-    fixed_code: str = ""
-
-
-class BugAnalysis(BaseModel):
-    """Bug 枚举分析结果(BUG_ANALYSIS_PROMPT 的输出契约)"""
-    bug_type: str = ""
-    bug_type_confidence: float = 0.0
-    severity: str = ""
-    severity_confidence: float = 0.0
-    scope: str = ""
-    scope_confidence: float = 0.0
-    description: str = ""
-    suggestion: str = ""
-
-
-class TestCaseSet(BaseModel):
-    """测试用例生成结果(TEST_CASE_PROMPT 的输出契约)"""
-    cases: str = ""
-    total: int = 0
-
+# ========== 结构化输出契约(调用方自带系统提示词) ==========
 
 class CodeReviewIssue(BaseModel):
-    """代码审查单项问题(CODE_ANALYSIS_PROMPT 的输出契约)"""
+    """代码审查单项问题"""
     type: str = ""
     severity: str = ""
     description: str = ""
@@ -78,7 +29,7 @@ class CodeReviewIssue(BaseModel):
 
 
 class CodeReview(BaseModel):
-    """代码审查结果(CODE_ANALYSIS_PROMPT 的输出契约)"""
+    """代码审查结果"""
     analysis: str = ""
     issues: List[CodeReviewIssue] = []
 

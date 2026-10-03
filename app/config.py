@@ -30,17 +30,12 @@ RELOAD = False
 KNOWLEDGE_DIR = storage_root / "knowledge_base"
 DATA_DIR = storage_root / "data"
 UPLOAD_DIR = storage_root / "uploads"
-PROJECT_FOLDERS_DIR = storage_root / "project_uploads"
-TEST_PROJECT_DIR = storage_root / "test_project"
 
-for _dir in (KNOWLEDGE_DIR, DATA_DIR, UPLOAD_DIR, PROJECT_FOLDERS_DIR, TEST_PROJECT_DIR):
+for _dir in (KNOWLEDGE_DIR, DATA_DIR, UPLOAD_DIR):
     _dir.mkdir(parents=True, exist_ok=True)
 
 # 数据库配置（SQLite 存储用户和对话记录）
 DATABASE_URL = f"sqlite:///{DATA_DIR / 'app.db'}"
-
-# 测试 Agent 检查点数据库（LangGraph 任务状态持久化，服务重启后任务可查询/恢复）
-CHECKPOINT_DB_PATH = DATA_DIR / "checkpoints.db"
 
 # CORS 允许的前端来源（逗号分隔，"*" 表示不限制；生产环境应收敛到实际前端地址）
 _cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
@@ -57,10 +52,3 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 RAG_CHUNK_SIZE = int(os.getenv("RAG_CHUNK_SIZE", "500"))            # 分块目标长度（字符）
 RAG_CHUNK_OVERLAP = int(os.getenv("RAG_CHUNK_OVERLAP", "100"))      # 超长句硬切时的重叠
 RAG_MIN_SIMILARITY = float(os.getenv("RAG_MIN_SIMILARITY", "0.3"))  # 检索相关度阈值（cosine 相似度）
-
-# Web 测试 Agent 感知配置（默认 DOM 文本感知：结构摘要 + 元素列表，成本约为视觉模式 1/3~1/5，
-# 且兼容 DeepSeek 等纯文本模型；开启后每步携带页面截图，可发现布局错乱等视觉类问题）
-TEST_AGENT_VISION = os.getenv("TEST_AGENT_VISION", "false").lower() in ("1", "true", "yes")
-
-# 浏览器是否无头运行:打包 exe/服务器环境默认 true;本机开发想观察浏览器过程设为 false
-TEST_AGENT_HEADLESS = os.getenv("TEST_AGENT_HEADLESS", "true").lower() in ("1", "true", "yes")

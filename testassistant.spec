@@ -27,11 +27,10 @@ hiddenimports = [
     "uvicorn.lifespan",
     "uvicorn.lifespan.on",
     "sqlalchemy.dialects.sqlite",
-    "aiosqlite",
 ]
 
 # chromadb:含 rust 原生绑定与大量运行时导入,整体收集最稳妥
-for pkg in ("chromadb", "playwright", "langgraph", "langgraph_checkpoint", "langchain_core"):
+for pkg in ("chromadb",):
     try:
         d, b, h = collect_all(pkg)
         datas += d
@@ -59,6 +58,8 @@ a = Analysis(
         "torch",
         "sentence_transformers",
         "langfuse",
+        "playwright",
+        "langgraph",
         "matplotlib",
         "PyQt5",
     ],

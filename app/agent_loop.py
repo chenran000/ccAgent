@@ -83,10 +83,9 @@ async def stream_agent(
     history: List[dict],
     ai_config: dict,
     session_id: str,
-    confidence: float,
 ) -> AsyncGenerator[dict, None]:
     """运行智能体循环,yield SSE 事件字典(meta/step/chunk/done/error)"""
-    yield {"type": "meta", "intent": "agent", "confidence": confidence, "session_id": session_id}
+    yield {"type": "meta", "intent": "agent", "session_id": session_id}
 
     if not (ai_config or {}).get("api_key"):
         yield {"type": "error", "message": "未配置AI模型,请先到模型管理配置"}

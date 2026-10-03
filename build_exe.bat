@@ -22,15 +22,6 @@ xcopy /E /I /Y frontend dist\testassistant\frontend >nul
 copy /Y dist\TestAssistantApp.exe dist\testassistant\ >nul
 del dist\TestAssistantApp.exe
 
-rem PyInstaller --clean 会清空 dist\testassistant,浏览器目录需重新放入
-if not exist "dist\testassistant\browsers\chromium-1243" (
-  echo 拷贝 Playwright 浏览器到内置 browsers\ ...
-  xcopy /E /I /Y "%LOCALAPPDATA%\ms-playwright\chromium-1243" "dist\testassistant\browsers\chromium-1243" >nul
-  xcopy /E /I /Y "%LOCALAPPDATA%\ms-playwright\chromium_headless_shell-1243" "dist\testassistant\browsers\chromium_headless_shell-1243" >nul
-  xcopy /E /I /Y "%LOCALAPPDATA%\ms-playwright\ffmpeg-1011" "dist\testassistant\browsers\ffmpeg-1011" >nul
-  xcopy /E /I /Y "%LOCALAPPDATA%\ms-playwright\winldd-1007" "dist\testassistant\browsers\winldd-1007" >nul
-)
-
 echo.
 echo 完成: dist\testassistant\TestAssistantApp.exe (双击启动,独立窗口)
 echo 数据目录: %%USERPROFILE%%\.testassistant (可用 TESTASSISTANT_STORAGE_DIR 重定向)

@@ -65,52 +65,6 @@ export interface FileInfo {
   file_size: number;
 }
 
-// ========== Web 测试 Agent ==========
-export interface TestStep {
-  step: number;
-  action: string;
-  target: string;
-  result: string;
-  success: boolean;
-  selector?: string;
-  screenshot_path?: string;
-  console_errors: string[];
-  network_errors: string[];
-}
-
-export interface CodeIssue {
-  file_path: string;
-  line_number: number;
-  issue_description: string;
-  error_log: string;
-  suggested_fix: string;
-  code_snippet?: string | null;
-}
-
-export interface FixResult {
-  issue_index: number;
-  confirmed: boolean;
-  success: boolean;
-  message: string;
-  fixed_code?: string;
-  fix_description?: string;
-}
-
-export type TestRunStatus = 'running' | 'awaiting_confirm' | 'completed' | 'cancelled' | 'failed';
-
-export interface TestRunState {
-  taskId?: string;
-  url?: string;
-  steps: TestStep[];
-  issues: CodeIssue[];
-  status: TestRunStatus;
-  message: string;
-  confirmCursor: number;
-  results: FixResult[];
-  scriptPath?: string;
-  reportPath?: string;
-}
-
 // ========== 聊天消息(前端渲染模型) ==========
 export interface AgentStep {
   step: number;
@@ -123,11 +77,10 @@ export interface AgentStep {
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
-  module: string; // agent / chat / code / case / knowledge / web_test
+  module: string; // agent / chat / code / case / knowledge
   text: string;
   data?: Record<string, unknown>;
   references?: string[];
-  testRun?: TestRunState;
   agentSteps?: AgentStep[];
   pending?: boolean;
   error?: string;
@@ -137,17 +90,6 @@ export interface ChatMessage {
 export interface ChatStreamEvent {
   type: string;
   [key: string]: unknown;
-}
-
-export function emptyTestRun(): TestRunState {
-  return {
-    steps: [],
-    issues: [],
-    status: 'running',
-    message: '',
-    confirmCursor: 0,
-    results: [],
-  };
 }
 
 // ========== 工作区 ==========

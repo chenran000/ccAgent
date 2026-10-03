@@ -93,17 +93,3 @@ class Document(Base):
     updated_at = Column(DateTime, default=lambda: datetime.now())
 
     user = relationship("User", backref="documents")
-
-
-class ProjectFolder(Base):
-    """用户上传的项目文件夹表"""
-    __tablename__ = "project_folders"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    folder_name = Column(String(255), nullable=False)  # 项目名称
-    folder_path = Column(String(500), nullable=False)  # 存储路径
-    created_at = Column(DateTime, default=lambda: datetime.now())
-    updated_at = Column(DateTime, default=lambda: datetime.now())
-
-    user = relationship("User", backref="project_folders")
