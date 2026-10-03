@@ -144,6 +144,55 @@ def _tool_run_command(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"success": False, "output": f"执行失败: {e}"}
 
 
+def _tool_read_memory(args: Dict[str, Any]) -> Dict[str, Any]:
+    from app.memory import read_memory
+    ws = ws_mod.get_current_workspace()
+    content = read_memory(ws)
+    return {"success": True, "output": content or "(项目记忆为空)"}
+
+
+def _tool_save_memory(args: Dict[str, Any]) -> Dict[str, Any]:
+    from app.memory import append_memory
+    ws = ws_mod.get_current_workspace()
+    entry = (args.get("entry") or "").strip()
+    if not entry:
+        return {"success": False, "output": "缺少记忆内容"}
+    append_memory(ws, entry)
+    return {"success": True, "output": f"已记住: {entry[:100]}"}
+
+
+def _tool_search_standards(args: Dict[str, Any]) -> Dict[str, Any]:
+    """搜索用户上传的编码规范(知识库 standards 分类)"""
+    query = (args.get("query") or "").strip()
+    if not query:
+        return {"success": False, "output": "缺少检索关键词"}
+    try:
+        from app.vector_db import vector_db
+        if not vector_db.enabled:
+            return {"success": False, "output": "知识库向量能力未启用,请配置 EMBEDDING_API_KEY"}
+        collection = vector_db._get_collection(_current_user_id())
+        results = collection.query(query_texts=[query], n_results=6,
+                                   where={"category": "standards"})
+        docs = (results.get("documents") or [[]])[0]
+        if not docs:
+            return {"success": True, "output": "规范库中没有匹配的内容"}
+        return {"success": True, "output": _clip("\n\n".join(docs))}
+    except Exception as e:
+        return {"success": False, "output": f"规范检索失败: {e}"}
+
+
+def _current_user_id() -> int:
+    """单用户版:取本地用户 id"""
+    from app.database import SessionLocal
+    from app.models import User
+    db = SessionLocal()
+    try:
+        user = db.query(User).order_by(User.id.asc()).first()
+        return user.id if user else 0
+    finally:
+        db.close()
+
+
 # ========== 工具注册表(OpenAI function calling 格式) ==========
 
 TOOL_IMPLEMENTATIONS = {
@@ -152,6 +201,9 @@ TOOL_IMPLEMENTATIONS = {
     "search_code": _tool_search_code,
     "write_file": _tool_write_file,
     "run_command": _tool_run_command,
+    "read_project_memory": _tool_read_memory,
+    "save_project_memory": _tool_save_memory,
+    "search_standards": _tool_search_standards,
 }
 
 TOOLS_SPEC = [
@@ -226,6 +278,42 @@ TOOLS_SPEC = [
                     "timeout": {"type": "integer", "description": "超时秒数,缺省 60"},
                 },
                 "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_project_memory",
+            "description": "读取项目记忆(跨会话持久的项目事实:技术栈/约定/历史工作/用户偏好)",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_project_memory",
+            "description": "把重要事实存入项目记忆(跨会话持久),如:项目技术栈、编码约定、用户的偏好、已完成的工作。系统提示已注入全部记忆,重复内容不必重复保存",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "entry": {"type": "string", "description": "要记住的一条事实(一句话)"}
+                },
+                "required": ["entry"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_standards",
+            "description": "在用户上传的编码规范库中检索相关规定(命名约定/安全红线/架构约定等),检查或写码前可先查规范",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "检索关键词,如 命名 / 安全 / 日志"}
+                },
+                "required": ["query"],
             },
         },
     },

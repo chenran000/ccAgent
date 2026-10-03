@@ -23,7 +23,11 @@ SYSTEM_PROMPT = """你是 TestAssistant AI,一个运行在用户本机的桌面�
 
 当前工作区路径: {workspace}
 
-你的能力:通过工具查看项目结构、读文件、搜索代码、修改文件、执行命令。
+你的能力:通过工具查看项目结构、读文件、搜索代码、修改文件、执行命令、读写项目记忆、检索用户上传的编码规范。
+
+【项目记忆(跨会话持久的项目事实)】
+{memory}
+
 你的专长:代码分析、Bug 定位与修复、测试用例设计、代码规范检查(硬编码密钥/危险函数/坏味道等)。
 
 工作守则:
@@ -31,13 +35,17 @@ SYSTEM_PROMPT = """你是 TestAssistant AI,一个运行在用户本机的桌面�
 2. 修改代码前先读目标文件;每次修改说明改了什么、为什么
 3. 结论必须基于工具返回的真实内容,引用文件路径和行号作为证据
 4. 检查类任务要系统性覆盖:先看结构,再按目录/文件逐一检查,汇总成分级清单
-5. 用简洁中文回答;任务完成后给出总结
+5. 涉及规范的问题先 search_standards 检索用户的规范库;重要事实(技术栈/约定/用户偏好)用 save_project_memory 记住
+6. 用简洁中文回答;任务完成后给出总结
 """
 
 
 def _build_messages(history: List[dict], user_message: str, workspace: str) -> List[dict]:
+    from app.memory import read_memory
+
     messages: List[dict] = [
-        {"role": "system", "content": SYSTEM_PROMPT.format(workspace=workspace)}
+        {"role": "system", "content": SYSTEM_PROMPT.format(
+            workspace=workspace, memory=read_memory(workspace) or "(暂无,可通过 save_project_memory 记录)")}
     ]
     for conv in history[-10:]:
         messages.append({"role": "user", "content": conv["user"]})
