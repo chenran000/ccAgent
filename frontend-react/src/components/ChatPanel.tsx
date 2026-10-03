@@ -1,8 +1,11 @@
 /** 聊天面板:消息流渲染 + SSE 发送 + 文件引用 */
 import { useEffect, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
 import {
   BookOpen,
   Bug,
+  ChevronDown,
+  ChevronRight,
   FileText,
   ListChecks,
   Loader2,
@@ -10,6 +13,7 @@ import {
   Send,
   Sparkles,
   Square,
+  Terminal,
   X,
 } from 'lucide-react';
 import {
@@ -56,6 +60,118 @@ const SAMPLES = [
   { icon: BookOpen, text: '什么是边界值分析和等价类划分？' },
   { icon: Sparkles, text: '帮我写一个 Python 快速排序实现' },
 ];
+
+// ---------- Markdown 渲染 ----------
+function MarkdownText({ text }: { text: string }) {
+  return (
+    <div className="text-sm text-gray-800 leading-relaxed break-words">
+      <ReactMarkdown
+        components={{
+          p: ({ children }) => <p className="my-1.5 first:mt-0 last:mb-0">{children}</p>,
+          h1: ({ children }) => <h1 className="text-base font-semibold mt-3 mb-1.5">{children}</h1>,
+          h2: ({ children }) => <h2 className="text-[15px] font-semibold mt-3 mb-1.5">{children}</h2>,
+          h3: ({ children }) => <h3 className="text-sm font-semibold mt-2.5 mb-1">{children}</h3>,
+          h4: ({ children }) => <h4 className="text-sm font-semibold mt-2 mb-1">{children}</h4>,
+          ul: ({ children }) => <ul className="list-disc pl-5 my-1.5 space-y-0.5">{children}</ul>,
+          ol: ({ children }) => <ol className="list-decimal pl-5 my-1.5 space-y-0.5">{children}</ol>,
+          li: ({ children }) => <li className="leading-relaxed">{children}</li>,
+          a: ({ children, href }) => (
+            <a href={href} target="_blank" rel="noreferrer" className="text-blue-600 underline underline-offset-2">{children}</a>
+          ),
+          blockquote: ({ children }) => (
+            <blockquote className="border-l-2 border-gray-300 pl-3 my-1.5 text-gray-600">{children}</blockquote>
+          ),
+          hr: () => <hr className="my-2 border-gray-200" />,
+          code: props => {
+            const { className, children } = props as { className?: string; children?: React.ReactNode };
+            const isBlock = /language-/.test(className ?? '');
+            if (isBlock) return <code className={`${className ?? ''} block font-mono`}>{children}</code>;
+            return <code className="px-1 py-0.5 rounded bg-gray-100 text-[12.5px] font-mono text-blue-700">{children}</code>;
+          },
+          pre: ({ children }) => (
+            <pre className="my-2 rounded-lg bg-gray-900 text-gray-100 p-3 overflow-x-auto text-xs font-mono leading-relaxed">
+              {children}
+            </pre>
+          ),
+          table: ({ children }) => (
+            <div className="my-2 overflow-x-auto">
+              <table className="text-xs border-collapse">{children}</table>
+            </div>
+          ),
+          th: ({ children }) => (
+            <th className="border border-gray-200 bg-gray-50 px-2 py-1 text-left font-medium">{children}</th>
+          ),
+          td: ({ children }) => <td className="border border-gray-200 px-2 py-1 align-top">{children}</td>,
+        }}
+      >
+        {text}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
+// ---------- 智能体工具步骤(默认折叠) ----------
+function AgentStepsBlock({ steps, pending }: { steps: AgentStep[]; pending?: boolean }) {
+  // 流式进行中默认展开看实时进度;结束后自动收起为一行摘要
+  const [expanded, setExpanded] = useState(!!pending);
+  const [openIdx, setOpenIdx] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!pending) {
+      setExpanded(false);
+      setOpenIdx(null);
+    }
+  }, [pending]);
+
+  if (steps.length === 0) return null;
+
+  const okCount = steps.filter(s => s.success).length;
+  return (
+    <div className="rounded-lg border border-gray-200 bg-gray-50/60 text-xs overflow-hidden">
+      <button
+        onClick={() => setExpanded(v => !v)}
+        className="w-full flex items-center gap-1.5 px-3 py-2 hover:bg-gray-100 transition-colors"
+      >
+        <Terminal className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+        <span className="text-gray-600 font-medium">
+          {pending ? '正在执行工具' : '执行了工具调用'}
+        </span>
+        <span className="text-gray-400">
+          {steps.length} 步{okCount < steps.length ? ` · ${steps.length - okCount} 步失败` : ''}
+        </span>
+        <span className="ml-auto text-gray-400">
+          {expanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+        </span>
+      </button>
+      {expanded && (
+        <div className="border-t border-gray-200 divide-y divide-gray-100 bg-white">
+          {steps.map((s, i) => (
+            <div key={i}>
+              <button
+                onClick={() => setOpenIdx(openIdx === i ? null : i)}
+                className="w-full flex items-center gap-1.5 px-3 py-1.5 hover:bg-gray-50 transition-colors text-left"
+              >
+                <span className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${s.success ? 'bg-green-500' : 'bg-red-500'}`} />
+                <span className="font-mono font-medium text-blue-700 shrink-0">{s.action}</span>
+                <span className="text-gray-400 truncate font-mono flex-1">{s.target}</span>
+                {s.result && (
+                  <span className="text-gray-300 shrink-0">
+                    {openIdx === i ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+                  </span>
+                )}
+              </button>
+              {openIdx === i && s.result && (
+                <div className="px-3 pb-2 pl-7 text-gray-500 font-mono whitespace-pre-wrap break-all max-h-48 overflow-y-auto scrollbar-thin">
+                  {s.result}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 // ---------- 历史记录映射 ----------
 function mapRecordToMessages(rec: ConversationRecord): ChatMessage[] {
@@ -331,24 +447,24 @@ export default function ChatPanel({ workspacePath, ...props }: ChatPanelProps) {
     if (m.module === 'agent') {
       return (
         <div className="space-y-2 w-full">
-          {(m.agentSteps ?? []).map((s, i) => (
-            <div key={i} className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs">
-              <div className="flex items-center gap-1.5">
-                <span className={`inline-block w-1.5 h-1.5 rounded-full ${s.success ? 'bg-green-500' : 'bg-red-500'}`} />
-                <span className="font-mono font-medium text-blue-700">{s.action}</span>
-                <span className="text-gray-400 truncate font-mono">{s.target}</span>
-              </div>
-              {s.result && (
-                <div className="mt-1 text-gray-500 font-mono whitespace-pre-wrap break-all line-clamp-3">{s.result}</div>
+          <AgentStepsBlock steps={m.agentSteps ?? []} pending={m.pending && !m.text} />
+          {(m.text || m.pending) && (
+            <div>
+              {m.text ? (
+                <MarkdownText text={m.text} />
+              ) : (
+                <div className="text-sm text-gray-800 leading-relaxed">
+                  {m.pending ? '思考中...' : ''}
+                  {m.pending && (
+                    <span className="inline-block w-1.5 h-4 bg-blue-500 animate-pulse ml-0.5 align-middle rounded-sm" />
+                  )}
+                </div>
+              )}
+              {m.pending && m.text && (
+                <span className="inline-block w-1.5 h-4 bg-blue-500 animate-pulse ml-0.5 align-middle rounded-sm" />
               )}
             </div>
-          ))}
-          <div className="text-sm text-gray-800 leading-relaxed whitespace-pre-wrap break-words">
-            {m.text || (m.pending ? '思考中...' : '')}
-            {m.pending && (
-              <span className="inline-block w-1.5 h-4 bg-blue-500 animate-pulse ml-0.5 align-middle rounded-sm" />
-            )}
-          </div>
+          )}
         </div>
       );
     }
@@ -361,9 +477,18 @@ export default function ChatPanel({ workspacePath, ...props }: ChatPanelProps) {
       }
     }
     return (
-      <div className="text-sm text-gray-800 leading-relaxed whitespace-pre-wrap break-words">
-        {m.text || (m.pending ? '思考中...' : '')}
-        {m.pending && (
+      <div>
+        {m.text ? (
+          <MarkdownText text={m.text} />
+        ) : (
+          <div className="text-sm text-gray-800 leading-relaxed">
+            {m.pending ? '思考中...' : ''}
+            {m.pending && (
+              <span className="inline-block w-1.5 h-4 bg-blue-500 animate-pulse ml-0.5 align-middle rounded-sm" />
+            )}
+          </div>
+        )}
+        {m.pending && m.text && (
           <span className="inline-block w-1.5 h-4 bg-blue-500 animate-pulse ml-0.5 align-middle rounded-sm" />
         )}
       </div>
