@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>TestAssistant AI — 打开项目就能问的桌面编程智能体</title>
+<meta name="description" content="TestAssistant AI 是一款运行在本机的桌面编程智能体:打开本地项目即可对话,规则引擎 + AI 语义审查做代码规范检查,知识库 RAG 与跨会话记忆让智能体越来越懂你的项目。" />
+<style>
+  :root {
+    --blue: #2563eb;
+    --blue-dark: #1d4ed8;
+    --ink: #0f172a;
+    --ink-2: #334155;
+    --ink-3: #64748b;
+    --line: #e2e8f0;
+    --bg-soft: #f8fafc;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+    color: var(--ink);
+    background: #fff;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  img { max-width: 100%; display: block; }
+  a { text-decoration: none; color: inherit; }
+  .container { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+
+  /* ===== 导航 ===== */
+  nav {
+    position: sticky; top: 0; z-index: 50;
+    background: rgba(255,255,255,.85); backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--line);
+  }
+  .nav-inner { display: flex; align-items: center; gap: 32px; height: 60px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; }
+  .brand img { width: 30px; height: 30px; }
+  .nav-links { display: flex; gap: 24px; font-size: 14px; color: var(--ink-3); margin-left: auto; }
+  .nav-links a:hover { color: var(--blue); }
+  .nav-cta {
+    background: var(--blue); color: #fff !important;
+    padding: 7px 16px; border-radius: 8px; font-weight: 500;
+  }
+  .nav-cta:hover { background: var(--blue-dark); }
+
+  /* ===== Hero ===== */
+  .hero {
+    padding: 88px 0 48px;
+    background:
+      radial-gradient(800px 400px at 15% -10%, rgba(37,99,235,.10), transparent),
+      radial-gradient(700px 380px at 90% 0%, rgba(99,102,241,.08), transparent);
+    text-align: center;
+  }
+  .hero-badge {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 13px; color: var(--blue-dark);
+    background: rgba(37,99,235,.08); border: 1px solid rgba(37,99,235,.18);
+    padding: 5px 14px; border-radius: 999px; margin-bottom: 22px;
+  }
+  .hero h1 {
+    font-size: clamp(32px, 5.2vw, 52px);
+    line-height: 1.22; letter-spacing: -.02em; font-weight: 800;
+  }
+  .hero h1 .accent { color: var(--blue); }
+  .hero .sub {
+    max-width: 640px; margin: 18px auto 0;
+    font-size: clamp(15px, 2vw, 18px); color: var(--ink-3);
+  }
+  .hero-actions { display: flex; gap: 14px; justify-content: center; margin-top: 32px; flex-wrap: wrap; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 13px 28px; border-radius: 12px; font-size: 15px; font-weight: 600;
+    transition: all .18s ease;
+  }
+  .btn-primary { background: var(--blue); color: #fff; box-shadow: 0 8px 20px -6px rgba(37,99,235,.5); }
+  .btn-primary:hover { background: var(--blue-dark); transform: translateY(-1px); }
+  .btn-ghost { border: 1px solid var(--line); color: var(--ink-2); background: #fff; }
+  .btn-ghost:hover { border-color: var(--blue); color: var(--blue); }
+  .hero-meta { margin-top: 14px; font-size: 12.5px; color: #94a3b8; }
+  .hero-shot {
+    max-width: 980px; margin: 48px auto 0; text-align: left;
+    border-radius: 16px; overflow: hidden;
+    border: 1px solid var(--line);
+    box-shadow: 0 30px 60px -25px rgba(15,23,42,.28), 0 6px 18px -8px rgba(15,23,42,.12);
+  }
+  .hero-shot .bar {
+    display: flex; align-items: center; gap: 7px;
+    background: var(--bg-soft); border-bottom: 1px solid var(--line); padding: 10px 14px;
+  }
+  .hero-shot .dot { width: 11px; height: 11px; border-radius: 50%; }
+  .hero-shot .url {
+    margin: 0 auto; font-size: 12px; color: var(--ink-3);
+    background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 2px 40px;
+  }
+
+  /* ===== 通用 section ===== */
+  section { padding: 84px 0; }
+  .kicker {
+    display: block; text-align: center; font-size: 13px; font-weight: 700;
+    letter-spacing: .12em; color: var(--blue); text-transform: uppercase; margin-bottom: 10px;
+  }
+  h2 { text-align: center; font-size: clamp(24px, 3.4vw, 34px); letter-spacing: -.01em; }
+  .section-sub { text-align: center; color: var(--ink-3); max-width: 560px; margin: 12px auto 0; font-size: 15.5px; }
+
+  /* ===== 特性网格 ===== */
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-top: 52px; }
+  .card {
+    border: 1px solid var(--line); border-radius: 16px; padding: 26px 24px;
+    background: #fff; transition: all .18s ease;
+  }
+  .card:hover { border-color: rgba(37,99,235,.4); box-shadow: 0 12px 28px -14px rgba(15,23,42,.18); transform: translateY(-3px); }
+  .card .icon {
+    width: 42px; height: 42px; border-radius: 11px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 20px; margin-bottom: 16px;
+    background: rgba(37,99,235,.09);
+  }
+  .card h3 { font-size: 16.5px; margin-bottom: 8px; }
+  .card p { font-size: 14px; color: var(--ink-3); }
+
+  /* ===== 展示块(图文左右) ===== */
+  .showcase { display: grid; grid-template-columns: 1fr 1fr; gap: 56px; align-items: center; margin-top: 72px; }
+  .showcase.reverse .shot { order: 2; }
+  .showcase h3 { font-size: 22px; margin-bottom: 12px; }
+  .showcase p { color: var(--ink-3); font-size: 15px; }
+  .showcase ul { margin-top: 16px; list-style: none; }
+  .showcase li {
+    position: relative; padding-left: 26px; margin-bottom: 10px;
+    font-size: 14.5px; color: var(--ink-2);
+  }
+  .showcase li::before {
+    content: "✓"; position: absolute; left: 0; top: 1px;
+    color: var(--blue); font-weight: 700;
+  }
+  .shot {
+    border-radius: 14px; overflow: hidden;
+    border: 1px solid var(--line);
+    box-shadow: 0 24px 48px -22px rgba(15,23,42,.25);
+  }
+
+  /* ===== 流程 ===== */
+  .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-top: 52px; counter-reset: step; }
+  .step {
+    position: relative; border: 1px solid var(--line); border-radius: 16px;
+    padding: 28px 24px 24px; background: var(--bg-soft);
+  }
+  .step::before {
+    counter-increment: step; content: counter(step);
+    position: absolute; top: -16px; left: 24px;
+    width: 34px; height: 34px; border-radius: 10px;
+    background: var(--blue); color: #fff; font-weight: 700; font-size: 15px;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 6px 14px -4px rgba(37,99,235,.5);
+  }
+  .step h3 { font-size: 16px; margin: 8px 0 8px; }
+  .step p { font-size: 13.5px; color: var(--ink-3); }
+  .step code {
+    font-family: ui-monospace, Consolas, monospace; font-size: 12.5px;
+    background: #eef2ff; color: var(--blue-dark);
+    padding: 2px 7px; border-radius: 6px;
+  }
+
+  /* ===== 安全/隐私横幅 ===== */
+  .privacy {
+    margin-top: 0;
+    background: linear-gradient(135deg, #0f172a, #1e293b);
+    color: #fff; border-radius: 20px;
+    padding: 52px 56px;
+    display: grid; grid-template-columns: auto 1fr; gap: 40px; align-items: center;
+  }
+  .privacy .lock { font-size: 52px; }
+  .privacy h2 { text-align: left; color: #fff; font-size: 24px; }
+  .privacy p { color: #94a3b8; margin-top: 10px; font-size: 14.5px; max-width: 640px; }
+  .privacy .tags { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }
+  .privacy .tag {
+    font-size: 12.5px; color: #cbd5e1;
+    border: 1px solid rgba(148,163,184,.35); border-radius: 999px; padding: 4px 14px;
+  }
+
+  /* ===== 底部 CTA ===== */
+  .cta { text-align: center; padding: 96px 0; }
+  .cta h2 { font-size: clamp(26px, 3.6vw, 38px); }
+  .cta p { color: var(--ink-3); margin: 14px 0 32px; font-size: 16px; }
+
+  footer { border-top: 1px solid var(--line); padding: 28px 0; color: var(--ink-3); font-size: 13px; }
+  .foot-inner { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+
+  @media (max-width: 860px) {
+    .grid, .steps { grid-template-columns: 1fr; }
+    .showcase { grid-template-columns: 1fr; gap: 28px; margin-top: 48px; }
+    .showcase.reverse .shot { order: 0; }
+    .privacy { grid-template-columns: 1fr; padding: 40px 28px; }
+    .nav-links a:not(.nav-cta) { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="container nav-inner">
+    <a class="brand" href="#top"><img src="assets/icon.png" alt="TestAssistant AI" />TestAssistant AI</a>
+    <div class="nav-links">
+      <a href="#features">功能</a>
+      <a href="#workflow">如何工作</a>
+      <a href="#privacy">数据安全</a>
+      <a class="nav-cta" href="#download">免费下载</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero" id="top">
+  <div class="container">
+    <span class="hero-badge">🖥️ Windows 桌面端 · 数据不出本机</span>
+    <h1>打开项目,直接开问<br /><span class="accent">你的本地编程智能体</span></h1>
+    <p class="sub">
+      TestAssistant AI 像打开文件夹一样打开你的项目:代码分析、Bug 定位、规范检查、自由提问,
+      全部由智能体现场读代码作答——每一条结论都有文件与行号作为证据。
+    </p>
+    <div class="hero-actions">
+      <a class="btn btn-primary" href="#download">⬇️ 免费下载 Windows 版</a>
+      <a class="btn btn-ghost" href="https://github.com/chenran000/ccAgent" target="_blank" rel="noreferrer">查看 GitHub</a>
+    </div>
+    <p class="hero-meta">安装即用,无需配置环境 · 自带安装向导 · 数据保存在本机用户目录</p>
+
+    <div class="hero-shot">
+      <div class="bar">
+        <span class="dot" style="background:#f87171"></span>
+        <span class="dot" style="background:#fbbf24"></span>
+        <span class="dot" style="background:#34d399"></span>
+        <span class="url">TestAssistant AI — 项目工作区</span>
+      </div>
+      <img src="assets/app-answer.png" alt="TestAssistant AI 对话界面:智能体读取项目后用结构化 Markdown 回答" />
+    </div>
+  </div>
+</header>
+
+<section id="features">
+  <div class="container">
+    <span class="kicker">Features</span>
+    <h2>为一个目标而生:让智能体真正读懂你的项目</h2>
+    <p class="section-sub">不是聊天窗口套壳,而是一套围绕"项目工作区"构建的完整能力。</p>
+
+    <div class="grid">
+      <div class="card">
+        <div class="icon">📂</div>
+        <h3>ZCode 式项目工作区</h3>
+        <p>像打开文件夹一样打开本地项目,文件树、文件内容、目录结构一目了然;一切问答与检查都以当前工作区为根。</p>
+      </div>
+      <div class="card">
+        <div class="icon">🤖</div>
+        <h3>工具调用型智能体</h3>
+        <p>智能体通过列目录、读文件、正则搜索、执行命令等工具现场收集事实再回答,过程透明可见,拒绝凭空猜测。</p>
+      </div>
+      <div class="card">
+        <div class="icon">🔍</div>
+        <h3>项目规范检查</h3>
+        <p>规则引擎零 token 秒扫硬编码密钥、危险函数、调试残留;AI 语义审查逐文件深入,产出分级问题清单与健康分报告。</p>
+      </div>
+      <div class="card">
+        <div class="icon">📚</div>
+        <h3>知识库 RAG</h3>
+        <p>上传团队编码规范、业务文档,检索增强让回答贴合你的约定;规范文档还会作为检查标准注入审查流程。</p>
+      </div>
+      <div class="card">
+        <div class="icon">🧠</div>
+        <h3>跨会话项目记忆</h3>
+        <p>技术栈、目录约定、你的偏好——智能体会主动记住重要事实,新开会话也延续上下文,越用越懂你的项目。</p>
+      </div>
+      <div class="card">
+        <div class="icon">🔌</div>
+        <h3>多模型自由接入</h3>
+        <p>DeepSeek、通义千问、Kimi、智谱或任何 OpenAI 兼容接口,填入 Key 即用;API Key 加密存储,不落明文。</p>
+      </div>
+    </div>
+
+    <div class="showcase">
+      <div class="shot"><img src="assets/app-steps.png" alt="工具调用步骤默认折叠,可逐条展开查看详情" /></div>
+      <div>
+        <h3>过程透明,结论可信</h3>
+        <p>智能体的每一步工具调用都折叠展示在一行摘要里,想深究时逐条展开,查看它到底读了哪个文件、搜了什么关键词。</p>
+        <ul>
+          <li>回答前先观察:结构 → 文件 → 证据链,杜绝幻觉</li>
+          <li>结论附文件路径与行号,可点开溯源</li>
+          <li>工具结果超长自动压缩,长会话不爆上下文</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="showcase reverse">
+      <div class="shot"><img src="assets/app-workspace.png" alt="项目文件树与对话并排的工作区布局" /></div>
+      <div>
+        <h3>IDE 式布局,对话与项目并排</h3>
+        <p>左侧会话与知识库,中间是对话主战场,右侧是项目文件树与检查报告——所有信息一屏尽览,不需要在窗口间来回切换。</p>
+        <ul>
+          <li>检查报告持久化保存,历史问题可回看追踪</li>
+          <li>原生目录选择框,双击即开项目</li>
+          <li>Markdown 精排版回答:标题、列表、代码块各归其位</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="workflow" style="background: var(--bg-soft);">
+  <div class="container">
+    <span class="kicker">Workflow</span>
+    <h2>三步开始,零学习成本</h2>
+    <p class="section-sub">不需要终端、不需要装 Python、不需要记任何命令。</p>
+    <div class="steps">
+      <div class="step">
+        <h3>打开项目</h3>
+        <p>点击 <code>打开项目</code>,在系统目录框里选中你的代码文件夹——就像在资源管理器里打开它一样。</p>
+      </div>
+      <div class="step">
+        <h3>对话或检查</h3>
+        <p>直接提问:<code>这个项目是做什么的?</code> <code>找出潜在的性能问题</code>,或一键运行全项目规范检查。</p>
+      </div>
+      <div class="step">
+        <h3>拿到可落地结论</h3>
+        <p>分级问题清单 + 健康分报告落盘保存;智能体发现的重要事实会写进项目记忆,下次打开依然记得。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="privacy">
+  <div class="container">
+    <div class="privacy">
+      <div class="lock">🔐</div>
+      <div>
+        <h2>代码是你的,数据也是你的</h2>
+        <p>
+          TestAssistant AI 运行在你的电脑上,服务只绑定本机回环地址;项目代码、检查报告、项目记忆、知识库
+          全部保存在本机用户目录,卸载重装都不丢失。唯一出网的请求,是你配置的 LLM API 调用——用什么模型、
+          发送什么内容,始终由你决定。API Key 使用 AES-256-GCM 加密落盘。
+        </p>
+        <div class="tags">
+          <span class="tag">服务仅绑 127.0.0.1</span>
+          <span class="tag">API Key AES-256-GCM 加密</span>
+          <span class="tag">数据存储 ~/.testassistant</span>
+          <span class="tag">卸载保留用户数据</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="cta" id="download">
+  <div class="container">
+    <h2>现在就打开你的第一个项目</h2>
+    <p>下载安装包,双击安装,一分钟内开始与你的代码对话。</p>
+    <div class="hero-actions">
+      <a class="btn btn-primary" href="https://github.com/chenran000/ccAgent/releases" target="_blank" rel="noreferrer">⬇️ 下载 Windows 安装包</a>
+      <a class="btn btn-ghost" href="https://github.com/chenran000/ccAgent" target="_blank" rel="noreferrer">GitHub 仓库</a>
+    </div>
+    <p class="hero-meta" style="margin-top:18px">Windows 10/11 · 安装包约 220MB · 免费使用,自备模型 API Key</p>
+  </div>
+</section>
+
+<footer>
+  <div class="container foot-inner">
+    <span>© 2026 TestAssistant AI</span>
+    <span>本机运行的桌面编程智能体 · <a href="https://github.com/chenran000/ccAgent" target="_blank" rel="noreferrer" style="color:var(--blue)">GitHub</a></span>
+  </div>
+</footer>
+
+</body>
+</html>
