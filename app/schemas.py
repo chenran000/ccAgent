@@ -61,7 +61,6 @@ class ChatRequest(BaseModel):
     content: str
     use_rag: bool = False
     session_id: Optional[str] = None
-    file_id: Optional[int] = None
 
 # ========== AI 模型管理相关模型 ==========
 

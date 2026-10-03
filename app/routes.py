@@ -915,7 +915,6 @@ def register_routes(app):
         import asyncio
 
         session_id = request.session_id
-        file_id = request.file_id
 
         if not session_id:
             session_id = uuid.uuid4().hex[:16]
@@ -928,22 +927,6 @@ def register_routes(app):
             db.commit()
 
         effective_content = request.content
-        file_info = None
-        if file_id:
-            doc = db.query(Document).filter(
-                Document.id == file_id,
-                Document.user_id == current_user.id
-            ).first()
-            if not doc:
-                raise HTTPException(status_code=404, detail="引用的文件不存在")
-            if not doc.extracted_text:
-                raise HTTPException(status_code=400, detail="该文件内容为空，无法读取")
-            effective_content = f"【文件内容：{doc.original_filename}】\n{doc.extracted_text}\n\n{request.content}"
-            file_info = {
-                "id": doc.id,
-                "filename": doc.original_filename,
-                "file_type": doc.file_type,
-            }
 
         ai_config = _get_user_ai_config(current_user.id, db)
         system_prompt = "你是一个专业的软件测试助手。请回答用户的问题。"
@@ -1096,7 +1079,7 @@ def register_routes(app):
                     "references": [],
                     "has_knowledge": request.use_rag,
                 }
-                input_text = f"[引用文件] {request.content}" if file_info else request.content
+                input_text = request.content
                 conversation = Conversation(
                     user_id=current_user.id,
                     session_id=session_id,

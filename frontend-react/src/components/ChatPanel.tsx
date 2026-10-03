@@ -1,4 +1,4 @@
-/** 聊天面板:消息流渲染 + SSE 发送 + 文件引用 */
+/** 聊天面板:消息流渲染 + SSE 发送 */
 import { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import {
@@ -6,27 +6,21 @@ import {
   Bug,
   ChevronDown,
   ChevronRight,
-  FileText,
   ListChecks,
-  Loader2,
-  Paperclip,
   Send,
   Sparkles,
   Square,
   Terminal,
-  X,
 } from 'lucide-react';
 import {
   listConversations,
   streamSSE,
-  uploadFile,
 } from '../lib/api';
 import {
   type AgentStep,
   type ChatMessage,
   type ChatStreamEvent,
   type ConversationRecord,
-  type FileInfo,
 } from '../lib/types';
 
 interface ChatPanelProps {
@@ -294,12 +288,9 @@ export default function ChatPanel({ workspacePath, ...props }: ChatPanelProps) {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [useRag, setUseRag] = useState(false);
-  const [attachedFile, setAttachedFile] = useState<FileInfo | null>(null);
-  const [uploading, setUploading] = useState(false);
   const [inputError, setInputError] = useState('');
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // 切换会话时加载历史
   useEffect(() => {
@@ -373,7 +364,7 @@ export default function ChatPanel({ workspacePath, ...props }: ChatPanelProps) {
 
   const send = async () => {
     const content = input.trim();
-    if (sending || !props.currentSessionId || (!content && !attachedFile)) return;
+    if (sending || !props.currentSessionId || !content) return;
 
     const userMsg: ChatMessage = {
       id: genId(),
@@ -393,8 +384,6 @@ export default function ChatPanel({ workspacePath, ...props }: ChatPanelProps) {
     };
     setMessages(prev => [...prev, userMsg, assistantMsg]);
     setInput('');
-    const fileId = attachedFile?.id;
-    setAttachedFile(null);
     setInputError('');
     setSending(true);
 
@@ -403,7 +392,7 @@ export default function ChatPanel({ workspacePath, ...props }: ChatPanelProps) {
     try {
       await streamSSE(
         '/chat/stream',
-        { content, session_id: props.currentSessionId, use_rag: useRag, file_id: fileId },
+        { content, session_id: props.currentSessionId, use_rag: useRag },
         ev => applyEvent(assistantId, ev),
         controller.signal,
       );
@@ -418,21 +407,6 @@ export default function ChatPanel({ workspacePath, ...props }: ChatPanelProps) {
       abortRef.current = null;
       patchMessage(assistantId, m => (m.pending ? { ...m, pending: false } : m));
       props.onSessionsChanged();
-    }
-  };
-
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = '';
-    if (!file) return;
-    setInputError('');
-    setUploading(true);
-    try {
-      setAttachedFile(await uploadFile(file));
-    } catch (err) {
-      setInputError(err instanceof Error ? err.message : '文件上传失败');
-    } finally {
-      setUploading(false);
     }
   };
 
@@ -531,9 +505,6 @@ export default function ChatPanel({ workspacePath, ...props }: ChatPanelProps) {
               <div key={m.id} className="flex justify-end animate-slide-up">
                 <div className="max-w-[80%] px-3.5 py-2.5 rounded-2xl rounded-br-md bg-blue-600 text-white text-sm leading-relaxed whitespace-pre-wrap break-words">
                   {m.text}
-                  {m.id.startsWith('hist') && m.text.startsWith('[引用文件]') && (
-                    <span className="block mt-1 text-[10px] text-blue-200">引用了文件内容</span>
-                  )}
                 </div>
               </div>
             ) : (
@@ -565,34 +536,7 @@ export default function ChatPanel({ workspacePath, ...props }: ChatPanelProps) {
           {inputError && (
             <div className="mb-2 text-xs text-red-500">{inputError}</div>
           )}
-          {attachedFile && (
-            <div className="mb-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-blue-50 text-xs text-blue-700">
-              <FileText className="w-3.5 h-3.5" />
-              <span className="truncate max-w-[200px]">{attachedFile.original_filename}</span>
-              <button
-                onClick={() => setAttachedFile(null)}
-                className="text-blue-400 hover:text-blue-600"
-              >
-                <X className="w-3 h-3" />
-              </button>
-            </div>
-          )}
           <div className="flex items-end gap-2">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".pdf,.txt"
-              className="hidden"
-              onChange={handleFileChange}
-            />
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              disabled={uploading || sending}
-              className="p-2.5 rounded-xl text-gray-400 hover:text-blue-600 hover:bg-blue-50 transition-colors disabled:opacity-40"
-              title="引用文件 (PDF/TXT)"
-            >
-              {uploading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Paperclip className="w-5 h-5" />}
-            </button>
             <button
               onClick={() => setUseRag(v => !v)}
               className={`flex items-center gap-1 px-2.5 py-2 rounded-xl text-xs transition-colors ${
@@ -629,7 +573,7 @@ export default function ChatPanel({ workspacePath, ...props }: ChatPanelProps) {
             ) : (
               <button
                 onClick={send}
-                disabled={!input.trim() && !attachedFile}
+                disabled={!input.trim()}
                 className="p-2.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40 transition-colors"
                 title="发送"
               >

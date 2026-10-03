@@ -1,4 +1,4 @@
-/** 侧边栏:视图切换、会话管理、知识库统计、用户信息 */
+/** 侧边栏:视图切换、会话管理、知识库统计 */
 import { useState } from 'react';
 import {
   BookOpen,
@@ -163,15 +163,6 @@ export default function Sidebar(props: SidebarProps) {
         </div>
       </div>
 
-      {/* 用户信息(单用户本地版,固定显示) */}
-      <div className="px-4 py-3 border-t border-border flex items-center gap-2.5">
-        <div className="w-8 h-8 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-sm font-semibold shrink-0">
-          L
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="text-sm text-gray-800 truncate">本地用户</div>
-        </div>
-      </div>
     </aside>
   );
 }
