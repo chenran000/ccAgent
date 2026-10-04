@@ -9,6 +9,8 @@ import {
   FileEdit,
   ListChecks,
   Send,
+  ShieldAlert,
+  ShieldCheck,
   Sparkles,
   Square,
   Terminal,
@@ -23,6 +25,8 @@ import {
   type ChatMessage,
   type ChatStreamEvent,
   type ConversationRecord,
+  type VerifyIssue,
+  type VerifyInfo,
   type WriteConfirm,
 } from '../lib/types';
 
@@ -172,39 +176,52 @@ function AgentStepsBlock({ steps, pending }: { steps: AgentStep[]; pending?: boo
   );
 }
 
-// ---------- 写文件确认卡(diff 审批) ----------
+// ---------- 写文件/执行命令确认卡(diff 或命令审批) ----------
 function ConfirmCard({ confirm, onResolve }: {
   confirm: WriteConfirm;
   onResolve: (changeId: string, approved: boolean) => void;
 }) {
   const decided = !!confirm.resolved;
+  const isCommand = confirm.kind === 'command';
   const lines = confirm.diff.split('\n');
   return (
     <div className={`rounded-lg border px-3 py-2.5 text-xs space-y-2 ${
       decided ? 'border-gray-200 bg-gray-50 opacity-70' : 'border-amber-300 bg-amber-50/60'
     }`}>
       <div className="flex items-center gap-1.5">
-        <FileEdit className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+        {isCommand
+          ? <Terminal className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+          : <FileEdit className="w-3.5 h-3.5 text-amber-600 shrink-0" />}
         <span className="font-medium text-gray-700">
-          {decided ? '已处理修改请求' : '智能体请求修改文件,请确认'}
+          {decided
+            ? '已处理请求'
+            : isCommand ? '智能体请求执行命令,请确认' : '智能体请求修改文件,请确认'}
         </span>
-        <span className="font-mono text-gray-500 truncate">{confirm.path}</span>
+        {!isCommand && <span className="font-mono text-gray-500 truncate">{confirm.path}</span>}
       </div>
-      <pre className="max-h-56 overflow-y-auto scrollbar-thin rounded bg-gray-900 p-2 font-mono text-[11px] leading-relaxed text-gray-100 whitespace-pre-wrap break-all">
-        {lines.map((l, i) => {
-          const cls = l.startsWith('+') && !l.startsWith('+++') ? 'text-green-400'
-            : l.startsWith('-') && !l.startsWith('---') ? 'text-red-400'
-            : l.startsWith('@@') ? 'text-blue-300' : '';
-          return <span key={i} className={cls}>{l + '\n'}</span>;
-        })}
-      </pre>
+      {isCommand ? (
+        <pre className="rounded bg-gray-900 p-2 font-mono text-[11px] leading-relaxed text-gray-100 whitespace-pre-wrap break-all">
+          {confirm.path}
+        </pre>
+      ) : (
+        <pre className="max-h-56 overflow-y-auto scrollbar-thin rounded bg-gray-900 p-2 font-mono text-[11px] leading-relaxed text-gray-100 whitespace-pre-wrap break-all">
+          {lines.map((l, i) => {
+            const cls = l.startsWith('+') && !l.startsWith('+++') ? 'text-green-400'
+              : l.startsWith('-') && !l.startsWith('---') ? 'text-red-400'
+              : l.startsWith('@@') ? 'text-blue-300' : '';
+            return <span key={i} className={cls}>{l + '\n'}</span>;
+          })}
+        </pre>
+      )}
       {!decided && (
         <div className="flex gap-2">
           <button
             onClick={() => onResolve(confirm.changeId, true)}
-            className="px-3 py-1.5 rounded-lg bg-green-600 text-white font-medium hover:bg-green-700 transition-colors"
+            className={`px-3 py-1.5 rounded-lg text-white font-medium transition-colors ${
+              isCommand ? 'bg-blue-600 hover:bg-blue-700' : 'bg-green-600 hover:bg-green-700'
+            }`}
           >
-            批准修改
+            {isCommand ? '允许执行' : '批准修改'}
           </button>
           <button
             onClick={() => onResolve(confirm.changeId, false)}
@@ -214,6 +231,29 @@ function ConfirmCard({ confirm, onResolve }: {
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+// ---------- 修复复查结果卡 ----------
+function VerifyCard({ verify }: { verify: VerifyInfo }) {
+  return (
+    <div className={`rounded-lg border px-3 py-2 text-xs space-y-1 ${
+      verify.clean ? 'border-green-200 bg-green-50/60' : 'border-amber-200 bg-amber-50/60'
+    }`}>
+      <div className="flex items-center gap-1.5 font-medium">
+        {verify.clean
+          ? <><ShieldCheck className="w-3.5 h-3.5 text-green-600" /><span className="text-green-700">修复复查通过 — 未再发现规则问题</span></>
+          : <><ShieldAlert className="w-3.5 h-3.5 text-amber-600" /><span className="text-amber-700">修复复查仍有问题</span></>}
+      </div>
+      <div className="text-gray-500 font-mono text-[11px]">复查文件: {verify.files.join(', ')}</div>
+      {!verify.clean && verify.remaining.map((i, idx) => (
+        <div key={idx} className="text-gray-600">
+          <span className="font-mono text-[11px] text-gray-500">{i.file}:{i.line}</span>
+          <span className="mx-1.5 text-[10px] font-mono text-gray-400">{i.rule_id}</span>
+          {i.message}
+        </div>
+      ))}
     </div>
   );
 }
@@ -412,8 +452,15 @@ export default function ChatPanel({ workspacePath, ...props }: ChatPanelProps) {
               changeId: asString(ev.change_id),
               path: asString(ev.path),
               diff: asString(ev.diff),
+              kind: ev.kind === 'command' ? 'command' as const : 'write' as const,
             },
           };
+        case 'verify':
+          return { ...m, verify: {
+            files: asArray<string>(ev.files),
+            clean: ev.clean === true,
+            remaining: asArray<VerifyIssue>(ev.remaining),
+          } };
         case 'error':
           return { ...m, pending: false, error: asString(ev.message, '请求失败') };
         case 'done': {
@@ -506,6 +553,7 @@ export default function ChatPanel({ workspacePath, ...props }: ChatPanelProps) {
             />
           )}
           <AgentStepsBlock steps={m.agentSteps ?? []} pending={m.pending && !m.text} />
+          {m.verify && <VerifyCard verify={m.verify} />}
           {(m.text || m.pending) && (
             <div>
               {m.text ? (

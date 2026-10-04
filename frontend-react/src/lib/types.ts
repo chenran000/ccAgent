@@ -78,7 +78,22 @@ export interface WriteConfirm {
   changeId: string;
   path: string;
   diff: string;
+  kind?: 'write' | 'command'; // write=展示 diff;command=展示待执行命令
   resolved?: boolean; // 用户已裁决(避免重复提交)
+}
+
+export interface VerifyIssue {
+  severity: string;
+  file: string;
+  line: number;
+  rule_id: string;
+  message: string;
+}
+
+export interface VerifyInfo {
+  files: string[];
+  clean: boolean;
+  remaining: VerifyIssue[];
 }
 
 export interface ChatMessage {
@@ -90,6 +105,7 @@ export interface ChatMessage {
   references?: string[];
   agentSteps?: AgentStep[];
   confirm?: WriteConfirm;
+  verify?: VerifyInfo;
   pending?: boolean;
   error?: string;
   createdAt: string;

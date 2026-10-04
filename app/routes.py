@@ -1007,6 +1007,7 @@ def register_routes(app):
             async def _agent_generator():
                 from app.agent_loop import stream_agent
                 final_answer = ""
+                written_files: list = []
                 try:
                     history_convs = db.query(Conversation).filter(
                         Conversation.user_id == current_user.id,
@@ -1031,13 +1032,36 @@ def register_routes(app):
                     ):
                         if event.get("type") == "answer":
                             final_answer = (event.get("data") or {}).get("answer", "")
+                            written_files = list((event.get("data") or {}).get("written_files") or [])
                         yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+                    # 修复后自动复查:对成功写入的文件重跑规则引擎,回填验证结果
+                    if written_files:
+                        try:
+                            from app import inspector
+                            remaining = await asyncio.to_thread(
+                                inspector.rule_scan, current_workspace, set(written_files))
+                            verify = {
+                                "files": written_files,
+                                "clean": not remaining,
+                                "remaining": [
+                                    {"severity": i["severity"], "file": i["file"], "line": i["line"],
+                                     "rule_id": i["rule_id"], "message": i["message"]}
+                                    for i in remaining[:20]
+                                ],
+                            }
+                        except Exception as e:
+                            logger.warning("修复复查失败(忽略): %s", e)
+                            verify = None
+                        if verify is not None:
+                            yield f"data: {json.dumps({'type': 'verify', **verify}, ensure_ascii=False)}\n\n"
                 finally:
                     chat_data = {
                         "answer": final_answer,
                         "references": [],
                         "has_knowledge": request.use_rag,
                         "agent": True,
+                        "written_files": written_files,
                     }
                     conversation = Conversation(
                         user_id=current_user.id,

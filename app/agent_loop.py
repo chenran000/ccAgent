@@ -131,6 +131,7 @@ async def stream_agent(
     client = build_plain_client(ai_config)
     model = ai_config["chat_model"]
     messages = _build_messages(history, user_message, workspace)
+    written_files: List[str] = []  # 本轮成功写入的文件(相对路径),供修复后自动复查
 
     try:
         for turn in range(1, MAX_TURNS + 1):
@@ -152,7 +153,8 @@ async def stream_agent(
                 for i in range(0, len(answer), 200):
                     yield {"type": "chunk", "content": answer[i:i + 200]}
                 # 终态用内部 answer 事件,由路由层统一补发 done 并落库
-                yield {"type": "answer", "data": {"answer": answer, "agent": True, "turns": turn}}
+                yield {"type": "answer", "data": {"answer": answer, "agent": True, "turns": turn,
+                                                  "written_files": written_files}}
                 return
 
             # 追加助手消息(含工具调用意图)
@@ -175,11 +177,11 @@ async def stream_agent(
                 except json.JSONDecodeError:
                     args = {}
 
-                # 写文件需用户确认:展示 diff,等待 /agent/confirm 裁决
+                # 写文件/执行命令需用户确认:展示 diff 或命令,等待 /agent/confirm 裁决
                 if tc.function.name == "write_file" and confirm_hook is not None:
                     change_id = f"chg-{turn}-{tc.id[-6:]}"
                     diff = _build_write_diff(workspace, args.get("path", ""), args.get("content", ""))
-                    yield {"type": "confirm_request", "change_id": change_id,
+                    yield {"type": "confirm_request", "change_id": change_id, "kind": "write",
                            "path": args.get("path", ""), "diff": diff}
                     approved = await confirm_hook(change_id)
                     if not approved:
@@ -191,8 +193,30 @@ async def stream_agent(
                                "target": _summarize_args(args), "result": "用户拒绝了该修改",
                                "success": False, "console_errors": [], "network_errors": []}
                         continue
+                elif tc.function.name == "run_command" and confirm_hook is not None:
+                    change_id = f"cmd-{turn}-{tc.id[-6:]}"
+                    yield {"type": "confirm_request", "change_id": change_id, "kind": "command",
+                           "path": args.get("command", ""), "diff": ""}
+                    approved = await confirm_hook(change_id)
+                    if not approved:
+                        messages.append({
+                            "role": "tool", "tool_call_id": tc.id,
+                            "content": "用户拒绝执行该命令。请勿再次提交相同命令,改用其他方案。",
+                        })
+                        yield {"type": "step", "step": turn, "action": "run_command(已拒绝)",
+                               "target": _summarize_args(args), "result": "用户拒绝了该命令",
+                               "success": False, "console_errors": [], "network_errors": []}
+                        continue
 
                 result = await asyncio.to_thread(execute_tool, tc.function.name, args)
+
+                if tc.function.name == "write_file" and result.get("success"):
+                    try:
+                        from app.agent_tools import _resolve
+                        abs_p = _resolve(args.get("path", ""))
+                        written_files.append(os.path.relpath(abs_p, workspace).replace(os.sep, "/"))
+                    except Exception:
+                        pass
                 preview = result["output"][:300]
                 messages.append({
                     "role": "tool",

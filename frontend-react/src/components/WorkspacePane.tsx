@@ -1,10 +1,11 @@
 /** 工作区组件:顶栏(当前项目路径 + 打开/关闭) + 右侧面板(项目文件/检查报告双 Tab,ZCode 式) */
-import { useCallback, useEffect, useState } from 'react';
-import { FolderOpen, FolderClosed, File as FileIcon, ListChecks, Loader2, ShieldCheck, Wrench, X } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { FolderOpen, FolderClosed, File as FileIcon, ListChecks, Loader2, ShieldCheck, TrendingUp, Wrench, X } from 'lucide-react';
 import {
   closeWorkspace,
   getReport,
   getWorkspace,
+  getWorkspaceFile,
   getWorkspaceTree,
   listReports,
   openWorkspace,
@@ -224,11 +225,109 @@ const SEVERITY_STYLE: Record<string, string> = {
   low: 'bg-gray-100 text-gray-600',
 };
 
-function ReportView({ report, onFixIssues, fixing }: {
+// ========== 代码定位弹窗(报告问题 → 文件内容高亮目标行) ==========
+function CodeLocateModal({ file, line, workspacePath, onClose }: {
+  file: string;
+  line: number;
+  workspacePath: string;
+  onClose: () => void;
+}) {
+  const [lines, setLines] = useState<string[] | null>(null);
+  const [error, setError] = useState('');
+  const targetRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const abs = `${workspacePath.replace(/[\\/]+$/, '')}/${file}`;
+    getWorkspaceFile(abs)
+      .then(({ content }) => { if (!cancelled) setLines((content ?? '').split('\n')); })
+      .catch(e => { if (!cancelled) setError(e instanceof Error ? e.message : '读取失败'); });
+    return () => { cancelled = true; };
+  }, [file, workspacePath]);
+
+  useEffect(() => {
+    if (lines) targetRef.current?.scrollIntoView({ block: 'center' });
+  }, [lines]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-3xl max-h-[80vh] flex flex-col rounded-xl bg-white shadow-2xl overflow-hidden"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="flex items-center gap-2 px-4 py-2.5 border-b border-border bg-gray-50">
+          <FileIcon className="w-4 h-4 text-gray-400 shrink-0" />
+          <span className="font-mono text-xs text-gray-700 truncate">{file}<span className="text-gray-400">:{line}</span></span>
+          <button onClick={onClose} className="ml-auto p-1 rounded hover:bg-gray-200 text-gray-400 hover:text-gray-600">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+        <div className="flex-1 min-h-0 overflow-auto scrollbar-thin bg-gray-900">
+          {error && <div className="p-4 text-xs text-red-400">{error}</div>}
+          {!lines && !error && <div className="p-4 text-xs text-gray-400">加载中...</div>}
+          {lines && (
+            <div className="py-2 font-mono text-[12px] leading-5">
+              {lines.map((l, i) => {
+                const no = i + 1;
+                const isTarget = no === line;
+                return (
+                  <div
+                    key={i}
+                    ref={isTarget ? targetRef : undefined}
+                    className={`flex ${isTarget ? 'bg-amber-500/25 border-y border-amber-400/40' : 'hover:bg-white/5'}`}
+                  >
+                    <span className="w-12 shrink-0 pr-2 text-right text-gray-500 select-none">{no}</span>
+                    <span className={`whitespace-pre-wrap break-all pr-4 ${isTarget ? 'text-amber-200' : 'text-gray-200'}`}>{l || ' '}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ========== 健康分趋势(历史报告 SVG 折线) ==========
+function ScoreTrend({ history }: { history: ReportSummary[] }) {
+  const pts = [...history].reverse().map(h => h.score ?? 0);
+  if (pts.length < 2) return null;
+  const w = 216, h = 44, pad = 4;
+  const xy = pts.map((s, i) => [
+    pad + (i * (w - 2 * pad)) / (pts.length - 1),
+    h - pad - (s / 100) * (h - 2 * pad),
+  ]);
+  const color = pts[pts.length - 1] >= 80 ? '#16a34a' : pts[pts.length - 1] >= 50 ? '#d97706' : '#dc2626';
+  return (
+    <div className="rounded-lg border border-gray-100 bg-white px-2.5 py-2">
+      <div className="flex items-center gap-1.5 text-[11px] text-gray-400 mb-1">
+        <TrendingUp className="w-3 h-3" />
+        健康分趋势(最近 {pts.length} 次检查)
+      </div>
+      <svg width="100%" viewBox={`0 0 ${w} ${h}`} className="block">
+        <polyline
+          points={xy.map(p => p.map(n => n.toFixed(1)).join(',')).join(' ')}
+          fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round"
+        />
+        {xy.map((p, i) => (
+          <circle key={i} cx={p[0]} cy={p[1]} r="2.5" fill={color} />
+        ))}
+      </svg>
+    </div>
+  );
+}
+
+function ReportView({ report, onFixIssues, fixing, workspacePath }: {
   report: ReportData;
   onFixIssues: (issues: ReportIssue[]) => void;
   fixing: boolean;
+  workspacePath: string;
 }) {
+  const [locate, setLocate] = useState<{ file: string; line: number } | null>(null);
   const sev = report.by_severity || {};
   const issues = report.issues || [];
   const highIssues = issues.filter(i => i.severity === 'critical' || i.severity === 'high');
@@ -268,7 +367,12 @@ function ReportView({ report, onFixIssues, fixing }: {
       )}
       <div className="space-y-2">
         {issues.slice(0, 60).map((issue, i) => (
-          <div key={i} className="rounded-lg border border-gray-200 bg-white px-2.5 py-2 text-xs">
+          <div
+            key={i}
+            onClick={() => setLocate({ file: issue.file, line: issue.line })}
+            className="rounded-lg border border-gray-200 bg-white px-2.5 py-2 text-xs cursor-pointer hover:border-blue-300 transition-colors"
+            title="点击查看问题所在代码"
+          >
             <div className="flex items-center gap-1.5 flex-wrap">
               <span className={`px-1.5 py-0.5 rounded ${SEVERITY_STYLE[issue.severity] || SEVERITY_STYLE.low}`}>{issue.severity}</span>
               <span className="font-mono text-[11px] text-gray-500 truncate">{issue.file}:{issue.line}</span>
@@ -293,6 +397,14 @@ function ReportView({ report, onFixIssues, fixing }: {
           <div className="text-xs text-gray-400 text-center">仅显示前 60 条,完整报告见导出文件</div>
         )}
       </div>
+      {locate && (
+        <CodeLocateModal
+          file={locate.file}
+          line={locate.line}
+          workspacePath={workspacePath}
+          onClose={() => setLocate(null)}
+        />
+      )}
     </div>
   );
 }
@@ -402,10 +514,11 @@ export function WorkspaceInspectPane({ workspacePath, onOpen, onFixIssues }: {
             ))}
           </div>
         )}
-        {report && <ReportView report={report} onFixIssues={handleFixIssues} fixing={fixing} />}
+        {report && <ReportView report={report} onFixIssues={handleFixIssues} fixing={fixing} workspacePath={workspacePath} />}
         {!report && history.length > 0 && (
           <div className="px-3 pb-4">
             <div className="text-xs font-medium text-gray-400 mb-1.5">历史报告</div>
+            <ScoreTrend history={history} />
             <div className="space-y-1">
               {history.map(h => (
                 <button
