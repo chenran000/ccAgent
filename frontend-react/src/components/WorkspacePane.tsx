@@ -1,6 +1,6 @@
 /** 工作区组件:顶栏(当前项目路径 + 打开/关闭) + 右侧面板(项目文件/检查报告双 Tab,ZCode 式) */
 import { useCallback, useEffect, useState } from 'react';
-import { FolderOpen, FolderClosed, File as FileIcon, ListChecks, Loader2, ShieldCheck, X } from 'lucide-react';
+import { FolderOpen, FolderClosed, File as FileIcon, ListChecks, Loader2, ShieldCheck, Wrench, X } from 'lucide-react';
 import {
   closeWorkspace,
   getReport,
@@ -127,12 +127,13 @@ export function WorkspaceHeader({ workspacePath, onOpen, onClose }: {
 }
 
 /** 右侧文件树面板 */
-export function WorkspaceFilesPane({ workspacePath, tree, expanded, toggle, onOpen }: {
+export function WorkspaceFilesPane({ workspacePath, tree, expanded, toggle, onOpen, onFixIssues }: {
   workspacePath: string | null;
   tree: FileNode[];
   expanded: Record<string, boolean>;
   toggle: (path: string) => void;
   onOpen: () => void;
+  onFixIssues: (issues: ReportIssue[]) => void;
 }) {
   const [tab, setTab] = useState<'files' | 'inspect'>('files');
 
@@ -183,7 +184,7 @@ export function WorkspaceFilesPane({ workspacePath, tree, expanded, toggle, onOp
             ))}
         </div>
       ) : (
-        <WorkspaceInspectPane workspacePath={workspacePath} onOpen={onOpen} />
+        <WorkspaceInspectPane workspacePath={workspacePath} onOpen={onOpen} onFixIssues={onFixIssues} />
       )}
     </div>
   );
@@ -191,25 +192,29 @@ export function WorkspaceFilesPane({ workspacePath, tree, expanded, toggle, onOp
 
 
 // ========== 检查报告 Tab ==========
+export interface ReportIssue {
+  severity: string;
+  source: string;
+  file: string;
+  line: number;
+  message: string;
+  evidence: string;
+  suggestion: string;
+  rule_id: string;
+}
+
 interface ReportData {
   workspace?: string;
   created_at?: string;
+  scope?: string;
   score?: number;
   total?: number;
   by_severity?: Record<string, number>;
   ai_files?: number;
+  cache_hits?: number;
   rule_count?: number;
   ai_count?: number;
-  issues?: {
-    severity: string;
-    source: string;
-    file: string;
-    line: number;
-    message: string;
-    evidence: string;
-    suggestion: string;
-    rule_id: string;
-  }[];
+  issues?: ReportIssue[];
 }
 
 const SEVERITY_STYLE: Record<string, string> = {
@@ -219,8 +224,14 @@ const SEVERITY_STYLE: Record<string, string> = {
   low: 'bg-gray-100 text-gray-600',
 };
 
-function ReportView({ report }: { report: ReportData }) {
+function ReportView({ report, onFixIssues, fixing }: {
+  report: ReportData;
+  onFixIssues: (issues: ReportIssue[]) => void;
+  fixing: boolean;
+}) {
   const sev = report.by_severity || {};
+  const issues = report.issues || [];
+  const highIssues = issues.filter(i => i.severity === 'critical' || i.severity === 'high');
   return (
     <div className="space-y-3 p-3">
       <div className="flex items-center gap-3">
@@ -228,32 +239,57 @@ function ReportView({ report }: { report: ReportData }) {
           {report.score ?? '-'}
         </div>
         <div className="text-xs text-gray-500">
-          <div>健康分</div>
+          <div>健康分{report.scope === 'changed' ? '(增量)' : ''}</div>
           <div>共 {report.total ?? 0} 个问题</div>
         </div>
       </div>
-      <div className="flex gap-1.5 text-xs">
+      <div className="flex gap-1.5 text-xs flex-wrap">
         {(['critical', 'high', 'medium', 'low'] as const).map(s => (
           <span key={s} className={`px-2 py-0.5 rounded-full ${SEVERITY_STYLE[s]}`}>{s} {sev[s] || 0}</span>
         ))}
       </div>
       <div className="text-[11px] text-gray-400">
         规则引擎 {report.rule_count ?? 0} 项 · AI 审查 {report.ai_files ?? 0} 个文件/{report.ai_count ?? 0} 项
+        {(report.cache_hits ?? 0) > 0 && ` · 缓存命中 ${report.cache_hits}`}
       </div>
+      {highIssues.length > 0 && !fixing && (
+        <button
+          onClick={() => onFixIssues(highIssues)}
+          className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-amber-500 text-white text-xs font-medium hover:bg-amber-600 transition-colors"
+        >
+          <Wrench className="w-3.5 h-3.5" />
+          让智能体修复全部高危问题({highIssues.length})
+        </button>
+      )}
+      {fixing && (
+        <div className="rounded-lg bg-blue-50 text-blue-700 text-xs px-3 py-2 text-center">
+          已发送到对话,智能体修复中 — 修改文件时会请求你确认 diff
+        </div>
+      )}
       <div className="space-y-2">
-        {(report.issues || []).slice(0, 60).map((issue, i) => (
+        {issues.slice(0, 60).map((issue, i) => (
           <div key={i} className="rounded-lg border border-gray-200 bg-white px-2.5 py-2 text-xs">
             <div className="flex items-center gap-1.5 flex-wrap">
               <span className={`px-1.5 py-0.5 rounded ${SEVERITY_STYLE[issue.severity] || SEVERITY_STYLE.low}`}>{issue.severity}</span>
               <span className="font-mono text-[11px] text-gray-500 truncate">{issue.file}:{issue.line}</span>
               <span className="text-[10px] text-gray-300 font-mono">{issue.rule_id}</span>
+              {!fixing && (
+                <button
+                  onClick={() => onFixIssues([issue])}
+                  className="ml-auto flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] text-blue-600 hover:bg-blue-50 transition-colors shrink-0"
+                  title="让智能体修复此问题"
+                >
+                  <Wrench className="w-3 h-3" />
+                  修复
+                </button>
+              )}
             </div>
             <div className="mt-1 text-gray-700">{issue.message}</div>
             {issue.evidence && <div className="mt-0.5 font-mono text-[11px] text-gray-400 break-all line-clamp-2">{issue.evidence}</div>}
             {issue.suggestion && <div className="mt-0.5 text-blue-700">建议: {issue.suggestion}</div>}
           </div>
         ))}
-        {(report.issues?.length || 0) > 60 && (
+        {issues.length > 60 && (
           <div className="text-xs text-gray-400 text-center">仅显示前 60 条,完整报告见导出文件</div>
         )}
       </div>
@@ -261,15 +297,18 @@ function ReportView({ report }: { report: ReportData }) {
   );
 }
 
-export function WorkspaceInspectPane({ workspacePath, onOpen }: {
+export function WorkspaceInspectPane({ workspacePath, onOpen, onFixIssues }: {
   workspacePath: string | null;
   onOpen: () => void;
+  onFixIssues: (issues: ReportIssue[]) => void;
 }) {
   const [running, setRunning] = useState(false);
+  const [onlyChanged, setOnlyChanged] = useState(false);
   const [steps, setSteps] = useState<{ action: string; target: string; result: string; success: boolean }[]>([]);
   const [report, setReport] = useState<ReportData | null>(null);
   const [history, setHistory] = useState<ReportSummary[]>([]);
   const [error, setError] = useState('');
+  const [fixing, setFixing] = useState(false);
 
   const loadHistory = useCallback(async () => {
     if (!workspacePath) return setHistory([]);
@@ -298,13 +337,19 @@ export function WorkspaceInspectPane({ workspacePath, onOpen }: {
         } else if (ev.type === 'error') {
           setError(String(ev.message ?? '检查失败'));
         }
-      });
+      }, undefined, onlyChanged ? 'changed' : 'all');
     } catch (e) {
       setError(e instanceof Error ? e.message : '检查失败');
     } finally {
       setRunning(false);
     }
-  }, [loadHistory]);
+  }, [loadHistory, onlyChanged]);
+
+  const handleFixIssues = useCallback((issues: ReportIssue[]) => {
+    if (issues.length === 0) return;
+    setFixing(true);
+    onFixIssues(issues);
+  }, [onFixIssues]);
 
   const openSaved = useCallback(async (name: string) => {
     try {
@@ -333,6 +378,15 @@ export function WorkspaceInspectPane({ workspacePath, onOpen }: {
           {running ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ShieldCheck className="w-3.5 h-3.5" />}
           {running ? '检查中...' : '运行规范检查'}
         </button>
+        <label className="flex items-center gap-1.5 text-[11px] text-gray-500 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={onlyChanged}
+            onChange={e => setOnlyChanged(e.target.checked)}
+            className="accent-blue-600"
+          />
+          仅检查 git 变更文件(增量,更快;未变更文件命中 AI 审查缓存)
+        </label>
         {error && <div className="text-xs text-red-500">{error}</div>}
       </div>
       <div className="flex-1 min-h-0 overflow-y-auto scrollbar-thin">
@@ -348,7 +402,7 @@ export function WorkspaceInspectPane({ workspacePath, onOpen }: {
             ))}
           </div>
         )}
-        {report && <ReportView report={report} />}
+        {report && <ReportView report={report} onFixIssues={handleFixIssues} fixing={fixing} />}
         {!report && history.length > 0 && (
           <div className="px-3 pb-4">
             <div className="text-xs font-medium text-gray-400 mb-1.5">历史报告</div>

@@ -89,6 +89,9 @@ def _migrate_plaintext_credentials():
 def register_routes(app):
     """注册所有 API 路由"""
 
+    # 写文件确认的待裁决 Future 表(change_id -> Future[bool]),由 /agent/confirm 解决
+    _pending_write_confirms: dict = {}
+
     # 初始化数据库
     init_db()
     _migrate_plaintext_credentials()
@@ -783,17 +786,34 @@ def register_routes(app):
         new_doc_id = vector_db.add_document(request.content, current_user.id, metadata)
         return {"doc_id": new_doc_id, "message": "更新成功"}
 
+    @app.post("/agent/confirm", summary="裁决智能体的写文件请求(diff 确认)")
+    async def agent_confirm(request: dict):
+        change_id = str(request.get("change_id") or "")
+        approved = bool(request.get("approved"))
+        fut = _pending_write_confirms.get(change_id)
+        if not fut or fut.done():
+            return {"success": False, "message": "确认请求不存在或已过期"}
+        fut.set_result(approved)
+        return {"success": True, "approved": approved}
+
     # ==================== 项目规范检查(inspector) ====================
 
     @app.post("/inspect/stream", summary="全项目规范检查(SSE 实时进度)")
     async def inspect_stream(
+        request: dict,
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db),
     ):
-        """规则引擎秒扫 + AI 分文件语义审查(规范文件注入),SSE 推进度与报告"""
+        """规则引擎秒扫 + AI 分文件语义审查(规范文件注入),SSE 推进度与报告
+
+        request.body: {"scope": "all"(默认全量) | "changed"(仅 git 变更文件)}
+        AI 审查结果按内容哈希缓存,未变更文件自动跳过
+        """
         import asyncio
 
         from app import inspector, workspace as ws_mod
+
+        scope = "changed" if request.get("scope") == "changed" else "all"
 
         ws = ws_mod.get_current_workspace()
         if not ws:
@@ -821,38 +841,58 @@ def register_routes(app):
                 return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
             try:
+                # 0. 增量范围解析(git 变更文件)
+                only_files: set | None = None
+                if scope == "changed":
+                    changed = await asyncio.to_thread(inspector.git_changed_files, ws)
+                    if changed is None:
+                        yield sse({"type": "step", "step": step_no, "action": "scope",
+                                   "target": "changed", "result": "不是 git 仓库,回退全量检查", "success": False})
+                    else:
+                        only_files = set(changed)
+                        yield sse({"type": "step", "step": step_no, "action": "scope",
+                                   "target": "changed",
+                                   "result": f"git 变更文件 {len(only_files)} 个", "success": True})
+
                 # 1. 规则引擎(秒扫)
                 step_no += 1
                 yield sse({"type": "step", "step": step_no, "action": "rule_scan",
                            "target": ws, "result": "规则引擎扫描中...", "success": True})
-                rule_issues = await asyncio.to_thread(inspector.rule_scan, ws)
+                rule_issues = await asyncio.to_thread(inspector.rule_scan, ws, only_files)
                 for issue in rule_issues:
                     if issue["severity"] in ("critical", "high"):
                         yield sse({"type": "step", "step": step_no, "action": f"rule:{issue['rule_id']}",
                                    "target": f"{issue['file']}:{issue['line']}",
                                    "result": issue["message"], "success": False})
 
-                # 2. AI 语义审查(分文件;未配模型则跳过)
+                # 2. AI 语义审查(分文件;未配模型则跳过;结果按内容哈希缓存)
                 ai_issues: list = []
                 ai_files = 0
+                cache_hits = 0
                 if (ai_config or {}).get("api_key"):
                     standards = await asyncio.to_thread(inspector.load_standards_text, current_user.id)
-                    candidates = await asyncio.to_thread(inspector.collect_code_files, ws)
+                    candidates = await asyncio.to_thread(inspector.collect_code_files, ws, only_files)
+                    review_cache = await asyncio.to_thread(inspector._load_review_cache, ws)
                     for i, item in enumerate(candidates, 1):
                         def _read_and_review(item=item):
                             try:
                                 code = Path(item["path"]).read_text(encoding="utf-8")
                             except Exception:
-                                return []
-                            return inspector.ai_review_file(ai_config, item["rel"], code, standards)
-                        found = await asyncio.to_thread(_read_and_review)
+                                return [], False
+                            return inspector.ai_review_file_cached(
+                                ai_config, ws, item["rel"], code, standards, review_cache)
+                        found, from_cache = await asyncio.to_thread(_read_and_review)
                         ai_files += 1
+                        if from_cache:
+                            cache_hits += 1
                         ai_issues.extend(found)
+                        note = " · 缓存命中" if from_cache else ""
                         yield sse({"type": "step", "step": step_no,
                                    "action": f"ai_review ({i}/{len(candidates)})",
                                    "target": item["rel"],
-                                   "result": f"发现 {len(found)} 个问题" if found else "未发现问题",
+                                   "result": (f"发现 {len(found)} 个问题" if found else "未发现问题") + note,
                                    "success": True})
+                    await asyncio.to_thread(inspector._save_review_cache, ws, review_cache)
                 else:
                     yield sse({"type": "step", "step": step_no, "action": "ai_review",
                                "target": "skipped", "result": "未配置AI模型,仅完成规则扫描", "success": False})
@@ -862,6 +902,7 @@ def register_routes(app):
                 report = {
                     "workspace": ws,
                     "created_at": datetime.now().isoformat(timespec="seconds"),
+                    "scope": "changed" if only_files is not None else "all",
                     "score": inspector.health_score(all_issues),
                     "total": len(all_issues),
                     "by_severity": {
@@ -869,6 +910,7 @@ def register_routes(app):
                         for s in ("critical", "high", "medium", "low")
                     },
                     "ai_files": ai_files,
+                    "cache_hits": cache_hits,
                     "rule_count": len(rule_issues),
                     "ai_count": len(ai_issues),
                     "issues": all_issues[:200],
@@ -951,6 +993,17 @@ def register_routes(app):
         from app import workspace as ws_mod
         current_workspace = ws_mod.get_current_workspace()
         if current_workspace:
+            async def _wait_confirm(change_id: str) -> bool:
+                """注册确认 Future 并等待用户裁决(/agent/confirm 解决);超时视为拒绝"""
+                fut = asyncio.get_event_loop().create_future()
+                _pending_write_confirms[change_id] = fut
+                try:
+                    return await asyncio.wait_for(fut, timeout=300)
+                except asyncio.TimeoutError:
+                    return False
+                finally:
+                    _pending_write_confirms.pop(change_id, None)
+
             async def _agent_generator():
                 from app.agent_loop import stream_agent
                 final_answer = ""
@@ -974,6 +1027,7 @@ def register_routes(app):
                         history=history,
                         ai_config=ai_config,
                         session_id=session_id,
+                        confirm_hook=_wait_confirm,
                     ):
                         if event.get("type") == "answer":
                             final_answer = (event.get("data") or {}).get("answer", "")

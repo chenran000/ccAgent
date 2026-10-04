@@ -4,7 +4,7 @@ import ChatPanel from './ChatPanel';
 import KnowledgePanel from './KnowledgePanel';
 import ModelPanel from './ModelPanel';
 import Sidebar, { type MainView } from './Sidebar';
-import { WorkspaceFilesPane, WorkspaceHeader, useWorkspace } from './WorkspacePane';
+import { WorkspaceFilesPane, WorkspaceHeader, useWorkspace, type ReportIssue } from './WorkspacePane';
 import { createSession, deleteSession, getKnowledgeStats, listSessions, renameSession } from '../lib/api';
 import type { SessionInfo } from '../lib/types';
 
@@ -16,6 +16,25 @@ export default function IDELayout() {
     () => localStorage.getItem('lastSessionId') || '',
   );
   const [knowledgeCount, setKnowledgeCount] = useState(0);
+  // 检查报告 → 对话的修复请求(nonce 变化触发 ChatPanel 自动发送)
+  const [pendingPrompt, setPendingPrompt] = useState<{ text: string; nonce: number } | null>(null);
+
+  const handleFixIssues = useCallback((issues: ReportIssue[]) => {
+    if (issues.length === 0) return;
+    const list = issues
+      .map(i =>
+        `- ${i.file}:${i.line} [${i.severity}/${i.rule_id}] ${i.message}`
+        + (i.evidence ? `\n  证据: ${i.evidence}` : '')
+        + (i.suggestion ? `\n  建议: ${i.suggestion}` : ''),
+      )
+      .join('\n');
+    const text =
+      `规范检查发现以下 ${issues.length} 个代码问题,请逐个修复:\n${list}\n\n`
+      + `要求:先读目标文件定位问题,再用 write_file 修复(修改前我会确认 diff),`
+      + `完成后用 search_code 自查问题已消除,最后简要总结改了什么。`;
+    setPendingPrompt({ text, nonce: Date.now() });
+    setView('chat');
+  }, []);
 
   const loadKnowledgeStats = useCallback(async () => {
     try {
@@ -129,6 +148,7 @@ export default function IDELayout() {
                 onSessionsChanged={refreshSessions}
                 onKnowledgeAdded={loadKnowledgeStats}
                 workspacePath={workspace.workspacePath}
+                pendingPrompt={pendingPrompt}
               />
             ) : (
               <div className="flex-1 flex items-center justify-center text-sm text-gray-400">
@@ -142,6 +162,7 @@ export default function IDELayout() {
             expanded={workspace.expanded}
             toggle={workspace.toggle}
             onOpen={workspace.open}
+            onFixIssues={handleFixIssues}
           />
         </div>
         {view === 'knowledge' && <KnowledgePanel onStatsChange={loadKnowledgeStats} />}

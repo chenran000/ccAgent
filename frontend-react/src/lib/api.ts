@@ -160,9 +160,18 @@ export async function uploadFile(file: File, category: 'doc' | 'standards' = 'do
 // ========== 规范检查 ==========
 export type InspectEvent = { type: string; [key: string]: unknown };
 
-/** POST SSE 规范检查:解析 data 行,逐事件回调 */
-export async function streamInspect(onEvent: (ev: InspectEvent) => void, signal?: AbortSignal): Promise<void> {
-  const res = await request('/inspect/stream', { method: 'POST', signal });
+/** POST SSE 规范检查:解析 data 行,逐事件回调;scope=changed 时仅检查 git 变更文件 */
+export async function streamInspect(
+  onEvent: (ev: InspectEvent) => void,
+  signal?: AbortSignal,
+  scope: 'all' | 'changed' = 'all',
+): Promise<void> {
+  const res = await request('/inspect/stream', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scope }),
+    signal,
+  });
   if (!res.ok || !res.body) throw new Error(`请求失败 (HTTP ${res.status})`);
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
@@ -196,6 +205,11 @@ export const listReports = () => apiJson<{ reports: ReportSummary[] }>('/inspect
 export const getReport = (name: string) => apiJson<Record<string, unknown>>(`/inspect/report?name=${encodeURIComponent(name)}`);
 
 // ========== 工作区(ZCode 式:打开本地项目文件夹) ==========
+export const confirmAgentChange = (changeId: string, approved: boolean) =>
+  apiJson<{ success: boolean }>('/agent/confirm', {
+    method: 'POST',
+    body: JSON.stringify({ change_id: changeId, approved }),
+  });
 export const getWorkspace = () => apiJson<{ path: string | null }>('/workspace');
 export const openWorkspace = (path: string) =>
   apiJson<{ path: string; name: string }>('/workspace', { method: 'POST', body: JSON.stringify({ path }) });

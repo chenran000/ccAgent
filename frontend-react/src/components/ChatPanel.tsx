@@ -6,6 +6,7 @@ import {
   Bug,
   ChevronDown,
   ChevronRight,
+  FileEdit,
   ListChecks,
   Send,
   Sparkles,
@@ -13,6 +14,7 @@ import {
   Terminal,
 } from 'lucide-react';
 import {
+  confirmAgentChange,
   listConversations,
   streamSSE,
 } from '../lib/api';
@@ -21,6 +23,7 @@ import {
   type ChatMessage,
   type ChatStreamEvent,
   type ConversationRecord,
+  type WriteConfirm,
 } from '../lib/types';
 
 interface ChatPanelProps {
@@ -28,6 +31,8 @@ interface ChatPanelProps {
   onSessionsChanged: () => void;
   onKnowledgeAdded: () => void;
   workspacePath?: string | null;
+  /** 外部(检查报告)注入的待发送提示,nonce 变化触发自动发送 */
+  pendingPrompt?: { text: string; nonce: number } | null;
 }
 
 // ---------- 小工具 ----------
@@ -161,6 +166,52 @@ function AgentStepsBlock({ steps, pending }: { steps: AgentStep[]; pending?: boo
               )}
             </div>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- 写文件确认卡(diff 审批) ----------
+function ConfirmCard({ confirm, onResolve }: {
+  confirm: WriteConfirm;
+  onResolve: (changeId: string, approved: boolean) => void;
+}) {
+  const decided = !!confirm.resolved;
+  const lines = confirm.diff.split('\n');
+  return (
+    <div className={`rounded-lg border px-3 py-2.5 text-xs space-y-2 ${
+      decided ? 'border-gray-200 bg-gray-50 opacity-70' : 'border-amber-300 bg-amber-50/60'
+    }`}>
+      <div className="flex items-center gap-1.5">
+        <FileEdit className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+        <span className="font-medium text-gray-700">
+          {decided ? '已处理修改请求' : '智能体请求修改文件,请确认'}
+        </span>
+        <span className="font-mono text-gray-500 truncate">{confirm.path}</span>
+      </div>
+      <pre className="max-h-56 overflow-y-auto scrollbar-thin rounded bg-gray-900 p-2 font-mono text-[11px] leading-relaxed text-gray-100 whitespace-pre-wrap break-all">
+        {lines.map((l, i) => {
+          const cls = l.startsWith('+') && !l.startsWith('+++') ? 'text-green-400'
+            : l.startsWith('-') && !l.startsWith('---') ? 'text-red-400'
+            : l.startsWith('@@') ? 'text-blue-300' : '';
+          return <span key={i} className={cls}>{l + '\n'}</span>;
+        })}
+      </pre>
+      {!decided && (
+        <div className="flex gap-2">
+          <button
+            onClick={() => onResolve(confirm.changeId, true)}
+            className="px-3 py-1.5 rounded-lg bg-green-600 text-white font-medium hover:bg-green-700 transition-colors"
+          >
+            批准修改
+          </button>
+          <button
+            onClick={() => onResolve(confirm.changeId, false)}
+            className="px-3 py-1.5 rounded-lg bg-gray-200 text-gray-700 font-medium hover:bg-gray-300 transition-colors"
+          >
+            拒绝
+          </button>
         </div>
       )}
     </div>
@@ -316,6 +367,15 @@ export default function ChatPanel({ workspacePath, ...props }: ChatPanelProps) {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [messages]);
 
+  // 外部注入的提示(检查报告一键修复):到达即自动发送
+  const lastNonceRef = useRef(0);
+  useEffect(() => {
+    if (!props.pendingPrompt || props.pendingPrompt.nonce === lastNonceRef.current) return;
+    lastNonceRef.current = props.pendingPrompt.nonce;
+    if (!sending) send(props.pendingPrompt.text);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.pendingPrompt?.nonce]);
+
   const patchMessage = (id: string, mutate: (m: ChatMessage) => ChatMessage) => {
     setMessages(prev => prev.map(m => (m.id === id ? mutate(m) : m)));
   };
@@ -345,6 +405,15 @@ export default function ChatPanel({ workspacePath, ...props }: ChatPanelProps) {
           };
           return { ...m, agentSteps: [...(m.agentSteps ?? []), step] };
         }
+        case 'confirm_request':
+          return {
+            ...m,
+            confirm: {
+              changeId: asString(ev.change_id),
+              path: asString(ev.path),
+              diff: asString(ev.diff),
+            },
+          };
         case 'error':
           return { ...m, pending: false, error: asString(ev.message, '请求失败') };
         case 'done': {
@@ -362,8 +431,8 @@ export default function ChatPanel({ workspacePath, ...props }: ChatPanelProps) {
     });
   };
 
-  const send = async () => {
-    const content = input.trim();
+  const send = async (contentOverride?: string) => {
+    const content = (contentOverride ?? input).trim();
     if (sending || !props.currentSessionId || !content) return;
 
     const userMsg: ChatMessage = {
@@ -421,6 +490,21 @@ export default function ChatPanel({ workspacePath, ...props }: ChatPanelProps) {
     if (m.module === 'agent') {
       return (
         <div className="space-y-2 w-full">
+          {m.confirm && (
+            <ConfirmCard
+              confirm={m.confirm}
+              onResolve={(changeId, approved) => {
+                patchMessage(m.id, msg =>
+                  msg.confirm?.changeId === changeId
+                    ? { ...msg, confirm: { ...msg.confirm, resolved: true } }
+                    : msg,
+                );
+                confirmAgentChange(changeId, approved).catch(() => {
+                  patchMessage(m.id, msg => (msg.confirm ? { ...msg, confirm: { ...msg.confirm, resolved: false } } : msg));
+                });
+              }}
+            />
+          )}
           <AgentStepsBlock steps={m.agentSteps ?? []} pending={m.pending && !m.text} />
           {(m.text || m.pending) && (
             <div>
@@ -572,7 +656,7 @@ export default function ChatPanel({ workspacePath, ...props }: ChatPanelProps) {
               </button>
             ) : (
               <button
-                onClick={send}
+                onClick={() => send()}
                 disabled={!input.trim()}
                 className="p-2.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40 transition-colors"
                 title="发送"

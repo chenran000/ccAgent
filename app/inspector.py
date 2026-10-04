@@ -71,8 +71,11 @@ CODE_ONLY_EXTS = {".py", ".js", ".ts", ".tsx", ".jsx", ".vue", ".java", ".go",
                   ".c", ".cpp", ".h", ".php", ".rb", ".rs"}
 
 
-def rule_scan(workspace: str) -> List[dict]:
-    """对工作区全量代码文件跑规则引擎,返回问题清单"""
+def rule_scan(workspace: str, only_files: Optional[set] = None) -> List[dict]:
+    """对工作区代码文件跑规则引擎,返回问题清单
+
+    only_files: 相对路径集合(增量模式),提供时只扫这些文件
+    """
     issues: List[dict] = []
     for root, dirs, files in os.walk(workspace):
         dirs[:] = [d for d in dirs if d not in _skip_dirs() and not d.startswith(".")]
@@ -81,13 +84,15 @@ def rule_scan(workspace: str) -> List[dict]:
             if ext not in CODE_EXTENSIONS:
                 continue
             full = os.path.join(root, name)
+            rel = os.path.relpath(full, workspace).replace(os.sep, "/")
+            if only_files is not None and rel not in only_files:
+                continue
             try:
                 if os.path.getsize(full) > MAX_FILE_BYTES:
                     continue
                 text = Path(full).read_text(encoding="utf-8")
             except Exception:
                 continue
-            rel = os.path.relpath(full, workspace).replace(os.sep, "/")
             lowered_path = rel.lower()
             src_lines = text.splitlines()
             for rule in RULES:
@@ -120,8 +125,11 @@ def _skip_dirs() -> set:
     return IGNORE_DIRS | {"browsers", "_internal", "node_modules"}
 
 
-def collect_code_files(workspace: str) -> List[dict]:
-    """收集参与 AI 审查的代码文件(按规则命中数与体积排序,限量)"""
+def collect_code_files(workspace: str, only_files: Optional[set] = None) -> List[dict]:
+    """收集参与 AI 审查的代码文件(按规则命中数与体积排序,限量)
+
+    only_files: 相对路径集合(增量模式),提供时只收集这些文件
+    """
     scored: List[dict] = []
     for root, dirs, files in os.walk(workspace):
         dirs[:] = [d for d in dirs if d not in _skip_dirs() and not d.startswith(".")]
@@ -130,17 +138,92 @@ def collect_code_files(workspace: str) -> List[dict]:
             if ext not in {".py", ".js", ".ts", ".tsx", ".jsx", ".vue", ".java", ".go"}:
                 continue
             full = os.path.join(root, name)
+            rel = os.path.relpath(full, workspace).replace(os.sep, "/")
+            if only_files is not None and rel not in only_files:
+                continue
             try:
                 size = os.path.getsize(full)
             except OSError:
                 continue
             if size > MAX_FILE_BYTES:
                 continue
-            rel = os.path.relpath(full, workspace).replace(os.sep, "/")
             scored.append({"path": full, "rel": rel, "size": size})
     # 优先中等体积的源码文件(过小的工具脚本价值低,过大的先截断)
     scored.sort(key=lambda f: (f["size"] < 500, f["size"]))
     return scored[:MAX_AI_FILES]
+
+
+# ========== git 增量支持 ==========
+
+def git_changed_files(workspace: str) -> Optional[List[str]]:
+    """git 变更文件(相对路径,含未跟踪);非 git 仓库或执行失败返回 None"""
+    import subprocess
+
+    try:
+        r = subprocess.run(
+            ["git", "-C", workspace, "status", "--porcelain"],
+            capture_output=True, text=True, timeout=10, errors="replace",
+        )
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    files = []
+    for line in (r.stdout or "").splitlines():
+        if len(line) < 4:
+            continue
+        p = line[3:].strip().strip('"')
+        if " -> " in p:
+            p = p.split(" -> ", 1)[1]  # 重命名取新路径
+        if p:
+            files.append(p.replace("\\", "/"))
+    return files
+
+
+def is_git_repo(workspace: str) -> bool:
+    return git_changed_files(workspace) is not None
+
+
+# ========== AI 审查缓存(内容哈希键控,改动即失效) ==========
+
+REVIEW_CACHE_DIR = DATA_DIR / "cache"
+
+
+def _review_cache_path(workspace: str) -> Path:
+    tag = hashlib.md5(workspace.encode()).hexdigest()[:8]
+    REVIEW_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    return REVIEW_CACHE_DIR / f"review_{tag}.json"
+
+
+def _load_review_cache(workspace: str) -> Dict[str, Any]:
+    try:
+        return json.loads(_review_cache_path(workspace).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_review_cache(workspace: str, cache: Dict[str, Any]) -> None:
+    try:
+        _review_cache_path(workspace).write_text(
+            json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+    except Exception as e:
+        logger.warning("审查缓存写入失败(忽略): %s", e)
+
+
+def ai_review_file_cached(ai_config: dict, workspace: str, rel: str, code: str,
+                          standards: str, cache: Dict[str, Any]) -> tuple:
+    """带缓存的 AI 审查。键 = 文件内容哈希 + 规范文本哈希 + 模型名;返回 (issues, from_cache)"""
+    key = hashlib.sha1(
+        f"{hashlib.sha1(code.encode('utf-8', 'ignore')).hexdigest()}"
+        f"|{hashlib.sha1(standards.encode('utf-8', 'ignore')).hexdigest()}"
+        f"|{(ai_config or {}).get('chat_model', '')}".encode()
+    ).hexdigest()
+    entry = cache.get(rel)
+    if entry and entry.get("key") == key:
+        return list(entry.get("issues", [])), True
+    issues = ai_review_file(ai_config, rel, code, standards)
+    cache[rel] = {"key": key, "issues": issues}
+    return issues, False
 
 
 def load_standards_text(user_id: int) -> str:

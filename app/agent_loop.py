@@ -3,11 +3,13 @@
 - OpenAI function calling 协议;每次工具执行向前端推一条 step 事件(复用现有渲染)
 - 历史上下文:该会话最近 10 轮对话 + 工作区信息注入系统提示
 - 上下文压缩:消息总长超过阈值时,把最早的工具结果替换为占位(防止上下文爆炸)
+- 写文件需人工确认:yield confirm_request 事件展示 diff,等待 /agent/confirm 裁决
 """
+import difflib
 import json
 import logging
 import os
-from typing import AsyncGenerator, Dict, List
+from typing import AsyncGenerator, Awaitable, Callable, List, Optional
 
 import asyncio
 
@@ -18,6 +20,8 @@ logger = logging.getLogger(__name__)
 
 MAX_TURNS = 25
 MAX_TOOL_RESULTS_IN_CONTEXT = 12  # 上下文中保留的最近工具结果条数
+CONFIRM_TIMEOUT_SECONDS = 300     # 等待用户裁决写文件的最长时间
+MAX_DIFF_LINES = 160              # 推给前端的 diff 最大行数
 
 SYSTEM_PROMPT = """你是 TestAssistant AI,一个运行在用户本机的桌面编程智能体,当前打开了用户的项目工作区。
 
@@ -79,14 +83,45 @@ def _summarize_args(args: dict) -> str:
     return json.dumps(args, ensure_ascii=False)[:80]
 
 
+def _build_write_diff(workspace: str, path: str, new_content: str) -> str:
+    """计算 write_file 将产生的统一 diff(路径围栏外返回提示文本)"""
+    from app.agent_tools import _resolve
+
+    try:
+        abs_path = _resolve(path)
+    except Exception:
+        return "(路径无效)"
+    rel = os.path.relpath(abs_path, workspace) if abs_path.startswith(workspace) else path
+    old_content = ""
+    is_new = not os.path.exists(abs_path)
+    if not is_new:
+        try:
+            old_content = open(abs_path, encoding="utf-8", errors="replace").read()
+        except Exception:
+            old_content = ""
+    diff = difflib.unified_diff(
+        old_content.splitlines(), new_content.splitlines(),
+        fromfile=f"a/{rel}", tofile=f"b/{rel}", lineterm="",
+    )
+    lines = list(diff)
+    if len(lines) > MAX_DIFF_LINES:
+        lines = lines[:MAX_DIFF_LINES] + [f"...(diff 截断,共 {len(lines)} 行变更)"]
+    header = f"新建文件 {rel}" if is_new else f"修改 {rel}"
+    return header + "\n" + "\n".join(lines)
+
+
 async def stream_agent(
     workspace: str,
     user_message: str,
     history: List[dict],
     ai_config: dict,
     session_id: str,
+    confirm_hook: Optional[Callable[[str], Awaitable[bool]]] = None,
 ) -> AsyncGenerator[dict, None]:
-    """运行智能体循环,yield SSE 事件字典(meta/step/chunk/done/error)"""
+    """运行智能体循环,yield SSE 事件字典(meta/step/confirm_request/chunk/done/error)
+
+    confirm_hook(change_id) -> bool:write_file 前等待用户裁决;未提供时视为直接放行。
+    """
     yield {"type": "meta", "intent": "agent", "session_id": session_id}
 
     if not (ai_config or {}).get("api_key"):
@@ -139,6 +174,24 @@ async def stream_agent(
                     args = json.loads(tc.function.arguments or "{}")
                 except json.JSONDecodeError:
                     args = {}
+
+                # 写文件需用户确认:展示 diff,等待 /agent/confirm 裁决
+                if tc.function.name == "write_file" and confirm_hook is not None:
+                    change_id = f"chg-{turn}-{tc.id[-6:]}"
+                    diff = _build_write_diff(workspace, args.get("path", ""), args.get("content", ""))
+                    yield {"type": "confirm_request", "change_id": change_id,
+                           "path": args.get("path", ""), "diff": diff}
+                    approved = await confirm_hook(change_id)
+                    if not approved:
+                        messages.append({
+                            "role": "tool", "tool_call_id": tc.id,
+                            "content": "用户拒绝了这次修改。请勿再次提交相同修改,继续其他工作或调整方案。",
+                        })
+                        yield {"type": "step", "step": turn, "action": "write_file(已拒绝)",
+                               "target": _summarize_args(args), "result": "用户拒绝了该修改",
+                               "success": False, "console_errors": [], "network_errors": []}
+                        continue
+
                 result = await asyncio.to_thread(execute_tool, tc.function.name, args)
                 preview = result["output"][:300]
                 messages.append({

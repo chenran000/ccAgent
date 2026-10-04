@@ -74,6 +74,13 @@ export interface AgentStep {
   success: boolean;
 }
 
+export interface WriteConfirm {
+  changeId: string;
+  path: string;
+  diff: string;
+  resolved?: boolean; // 用户已裁决(避免重复提交)
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -82,6 +89,7 @@ export interface ChatMessage {
   data?: Record<string, unknown>;
   references?: string[];
   agentSteps?: AgentStep[];
+  confirm?: WriteConfirm;
   pending?: boolean;
   error?: string;
   createdAt: string;
