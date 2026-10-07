@@ -22,6 +22,9 @@ MAX_TURNS = 25
 MAX_TOOL_RESULTS_IN_CONTEXT = 12  # 上下文中保留的最近工具结果条数
 CONFIRM_TIMEOUT_SECONDS = 300     # 等待用户裁决写文件的最长时间
 MAX_DIFF_LINES = 160              # 推给前端的 diff 最大行数
+HISTORY_COMPACT_CHARS = 24000     # 历史对话超过该字符数时触发 LLM 摘要压缩
+HISTORY_KEEP_RECENT = 4           # 摘要压缩时保留的最近对话轮数
+HISTORY_WINDOW = 10               # 进上下文的历史轮数窗口
 
 SYSTEM_PROMPT = """你是 TestAssistant AI,一个运行在用户本机的桌面编程智能体,当前打开了用户的项目工作区。
 
@@ -53,12 +56,50 @@ def _build_messages(history: List[dict], user_message: str, workspace: str) -> L
         {"role": "system", "content": SYSTEM_PROMPT.format(
             workspace=workspace, memory=read_memory(workspace) or "(暂无,可通过 save_project_memory 记录)")}
     ]
-    for conv in history[-10:]:
+    for conv in history[-HISTORY_WINDOW:]:
         messages.append({"role": "user", "content": conv["user"]})
         if conv.get("assistant"):
             messages.append({"role": "assistant", "content": conv["assistant"]})
     messages.append({"role": "user", "content": user_message})
     return messages
+
+
+SUMMARY_PROMPT = """把以下多轮对话压缩成一份要点摘要,供智能体在后续对话中延续上下文。保留:
+用户的目标与约束、已确认的事实(文件路径/结论/决定)、未完成的事项。不保留寒暄与重复内容,直接输出摘要正文。"""
+
+
+def _history_chars(history: List[dict]) -> int:
+    return sum(len(c.get("user") or "") + len(c.get("assistant") or "") for c in history)
+
+
+def _summarize_history_sync(client, model: str, history: List[dict]) -> List[dict]:
+    """把较早的轮次交给 LLM 压缩成一条摘要消息,保留最近 HISTORY_KEEP_RECENT 轮原文"""
+    old, recent = history[:-HISTORY_KEEP_RECENT], history[-HISTORY_KEEP_RECENT:]
+    transcript = "\n\n".join(
+        f"用户: {c.get('user') or ''}\n助手: {(c.get('assistant') or '')[:800]}" for c in old)
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": SUMMARY_PROMPT},
+            {"role": "user", "content": transcript[:16000]},
+        ],
+        temperature=0.2, max_tokens=800,
+    )
+    summary = (resp.choices[0].message.content or "").strip()
+    if not summary:
+        raise ValueError("空摘要")
+    return [{"user": f"[早前对话摘要(系统自动压缩)]\n{summary}", "assistant": ""}] + recent
+
+
+async def _compact_history(client, model: str, history: List[dict]) -> List[dict]:
+    """长会话历史压缩:超出阈值用 LLM 摘要,失败则退化为只保留最近几轮"""
+    if _history_chars(history) <= HISTORY_COMPACT_CHARS:
+        return history
+    try:
+        return await asyncio.to_thread(_summarize_history_sync, client, model, history)
+    except Exception as e:
+        logger.warning("历史摘要压缩失败,退化为截断: %s", e)
+        return history[-HISTORY_KEEP_RECENT:]
 
 
 def _compact(messages: List[dict]) -> List[dict]:
@@ -130,6 +171,7 @@ async def stream_agent(
 
     client = build_plain_client(ai_config)
     model = ai_config["chat_model"]
+    history = await _compact_history(client, model, history)
     messages = _build_messages(history, user_message, workspace)
     written_files: List[str] = []  # 本轮成功写入的文件(相对路径),供修复后自动复查
 

@@ -163,6 +163,31 @@ def register_routes(app):
         info = read_file_content(path)
         return {"path": path, **info}
 
+    @app.get("/workspace/file-backups", summary="查询文件的历史备份(.bak 轮转,新→旧)")
+    async def workspace_file_backups(path: str):
+        from app import agent_tools
+        from app import workspace as ws_mod
+        ws = ws_mod.get_current_workspace()
+        if not ws:
+            raise HTTPException(status_code=400, detail="未打开工作区")
+        if not ws_mod.is_within_workspace(path):
+            raise HTTPException(status_code=403, detail="路径不在工作区内")
+        if not os.path.isfile(path):
+            raise HTTPException(status_code=404, detail="文件不存在")
+        return {"path": path, "backups": agent_tools.list_backups(path)}
+
+    @app.post("/workspace/restore-backup", summary="把文件恢复到指定备份版本(恢复前的内容入备份链)")
+    async def workspace_restore_backup(request: dict):
+        from app import agent_tools
+        rel = str(request.get("path") or "")
+        suffix = str(request.get("suffix") or "")
+        try:
+            restored = agent_tools.restore_backup(rel, suffix)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return {"success": True, "path": restored,
+                "message": f"已恢复 {restored} 到 {suffix} 版本(恢复前的内容已存入 .bak,可再次撤销)"}
+
     # ==================== 会话管理接口 ====================
 
     @app.get("/sessions", response_model=SessionListResponse)
@@ -798,6 +823,61 @@ def register_routes(app):
 
     # ==================== 项目规范检查(inspector) ====================
 
+    @app.get("/inspect/rules", summary="检查规则列表(内置 + 自定义)")
+    async def inspect_rules(current_user: User = Depends(get_current_user)):
+        from app import inspector
+        return {
+            "builtin": [{k: r[k] for k in ("id", "severity", "pattern", "message", "code_only") if k in r}
+                        for r in inspector.RULES],
+            "custom": inspector.load_custom_rules(),
+        }
+
+    @app.post("/inspect/rules", summary="新增自定义检查规则")
+    async def inspect_add_rule(request: dict, current_user: User = Depends(get_current_user)):
+        import re as _re
+
+        from app import inspector
+
+        pattern = str(request.get("pattern") or "").strip()
+        if not pattern:
+            raise HTTPException(400, "正则表达式不能为空")
+        try:
+            _re.compile(pattern)
+        except _re.error as e:
+            raise HTTPException(400, f"正则表达式不合法: {e}")
+        severity = str(request.get("severity") or "medium").lower()
+        if severity not in inspector.VALID_SEVERITIES:
+            raise HTTPException(400, f"严重级别必须是 {inspector.VALID_SEVERITIES} 之一")
+        rules = inspector.load_custom_rules()
+        if len(rules) >= inspector.MAX_CUSTOM_RULES:
+            raise HTTPException(400, f"自定义规则最多 {inspector.MAX_CUSTOM_RULES} 条")
+        rid = str(request.get("id") or "").strip().upper()
+        if not rid:
+            existing = {r["id"] for r in rules}
+            n = len(rules) + 1
+            while f"CUSTOM_{n:02d}" in existing:
+                n += 1
+            rid = f"CUSTOM_{n:02d}"
+        elif rid in {r["id"] for r in inspector.RULES} or any(r["id"] == rid for r in rules):
+            raise HTTPException(400, f"规则 ID 已存在: {rid}")
+        rules.append({
+            "id": rid, "severity": severity, "pattern": pattern,
+            "message": str(request.get("message") or "").strip() or f"自定义规则 {rid}",
+            "code_only": bool(request.get("code_only", False)),
+        })
+        inspector.save_custom_rules(rules)
+        return {"message": f"已添加规则 {rid}", "id": rid}
+
+    @app.delete("/inspect/rules/{rule_id}", summary="删除自定义检查规则")
+    async def inspect_delete_rule(rule_id: str, current_user: User = Depends(get_current_user)):
+        from app import inspector
+        rules = inspector.load_custom_rules()
+        remaining = [r for r in rules if r["id"] != rule_id]
+        if len(remaining) == len(rules):
+            raise HTTPException(404, "自定义规则不存在(内置规则不可删除)")
+        inspector.save_custom_rules(remaining)
+        return {"message": f"已删除规则 {rule_id}"}
+
     @app.post("/inspect/stream", summary="全项目规范检查(SSE 实时进度)")
     async def inspect_stream(
         request: dict,
@@ -865,7 +945,7 @@ def register_routes(app):
                                    "target": f"{issue['file']}:{issue['line']}",
                                    "result": issue["message"], "success": False})
 
-                # 2. AI 语义审查(分文件;未配模型则跳过;结果按内容哈希缓存)
+                # 2. AI 语义审查(分文件并发,信号量限流;未配模型则跳过;结果按内容哈希缓存)
                 ai_issues: list = []
                 ai_files = 0
                 cache_hits = 0
@@ -873,23 +953,32 @@ def register_routes(app):
                     standards = await asyncio.to_thread(inspector.load_standards_text, current_user.id)
                     candidates = await asyncio.to_thread(inspector.collect_code_files, ws, only_files)
                     review_cache = await asyncio.to_thread(inspector._load_review_cache, ws)
-                    for i, item in enumerate(candidates, 1):
-                        def _read_and_review(item=item):
+                    sem = asyncio.Semaphore(4)  # 小并发:LLM 端点限流友好,总耗时约降到串行的 1/3
+
+                    async def _review_one(item: dict):
+                        def _work():
                             try:
                                 code = Path(item["path"]).read_text(encoding="utf-8")
                             except Exception:
                                 return [], False
                             return inspector.ai_review_file_cached(
                                 ai_config, ws, item["rel"], code, standards, review_cache)
-                        found, from_cache = await asyncio.to_thread(_read_and_review)
+                        async with sem:
+                            return item["rel"], *(await asyncio.to_thread(_work))
+
+                    tasks = [asyncio.create_task(_review_one(item)) for item in candidates]
+                    done_n = 0
+                    for fut in asyncio.as_completed(tasks):
+                        rel, found, from_cache = await fut
+                        done_n += 1
                         ai_files += 1
                         if from_cache:
                             cache_hits += 1
                         ai_issues.extend(found)
                         note = " · 缓存命中" if from_cache else ""
                         yield sse({"type": "step", "step": step_no,
-                                   "action": f"ai_review ({i}/{len(candidates)})",
-                                   "target": item["rel"],
+                                   "action": f"ai_review ({done_n}/{len(candidates)})",
+                                   "target": rel,
                                    "result": (f"发现 {len(found)} 个问题" if found else "未发现问题") + note,
                                    "success": True})
                     await asyncio.to_thread(inspector._save_review_cache, ws, review_cache)

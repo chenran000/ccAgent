@@ -70,6 +70,54 @@ RULE_SEVERITY_DEMOTE_IN = {"test", "spec", "mock", "example", "docs"}
 CODE_ONLY_EXTS = {".py", ".js", ".ts", ".tsx", ".jsx", ".vue", ".java", ".go",
                   ".c", ".cpp", ".h", ".php", ".rb", ".rs"}
 
+# ========== 自定义规则(用户可在前端增删,持久化到 DATA_DIR/rules.json) ==========
+
+CUSTOM_RULES_PATH = DATA_DIR / "rules.json"
+VALID_SEVERITIES = ("critical", "high", "medium", "low")
+MAX_CUSTOM_RULES = 50
+
+
+def load_custom_rules() -> List[dict]:
+    """读取自定义规则;单条不合法(缺字段/正则编译失败)直接跳过,不让坏规则拖垮检查"""
+    try:
+        data = json.loads(CUSTOM_RULES_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    raw = data.get("rules", []) if isinstance(data, dict) else []
+    out: List[dict] = []
+    for r in raw:
+        if not isinstance(r, dict):
+            continue
+        rid = str(r.get("id") or "").strip()
+        pattern = str(r.get("pattern") or "")
+        if not rid or not pattern:
+            continue
+        try:
+            re.compile(pattern)
+        except re.error:
+            continue
+        severity = str(r.get("severity") or "medium").lower()
+        out.append({
+            "id": rid,
+            "severity": severity if severity in VALID_SEVERITIES else "medium",
+            "pattern": pattern,
+            "message": str(r.get("message") or "").strip() or f"自定义规则 {rid}",
+            "code_only": bool(r.get("code_only", False)),
+            "custom": True,
+        })
+    return out
+
+
+def save_custom_rules(rules: List[dict]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    CUSTOM_RULES_PATH.write_text(
+        json.dumps({"rules": rules}, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def get_all_rules() -> List[Dict[str, Any]]:
+    """内置规则 + 自定义规则(rule_scan 实际执行的规则集)"""
+    return RULES + load_custom_rules()
+
 
 def rule_scan(workspace: str, only_files: Optional[set] = None) -> List[dict]:
     """对工作区代码文件跑规则引擎,返回问题清单
@@ -95,7 +143,7 @@ def rule_scan(workspace: str, only_files: Optional[set] = None) -> List[dict]:
                 continue
             lowered_path = rel.lower()
             src_lines = text.splitlines()
-            for rule in RULES:
+            for rule in get_all_rules():
                 if rule.get("code_only") and ext not in CODE_ONLY_EXTS:
                     continue
                 for m in re.finditer(rule["pattern"], text):

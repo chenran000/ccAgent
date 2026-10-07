@@ -2,6 +2,7 @@
 import { API_BASE } from '../config';
 import type {
   ActiveModel,
+  BackupInfo,
   ChatStreamEvent,
   ConversationRecord,
   FileNode,
@@ -9,6 +10,7 @@ import type {
   KnowledgeDoc,
   KnowledgeStats,
   ModelConfigInfo,
+  RuleInfo,
   SessionInfo,
   SupportedPlatform,
 } from './types';
@@ -204,6 +206,14 @@ export interface ReportSummary {
 export const listReports = () => apiJson<{ reports: ReportSummary[] }>('/inspect/reports');
 export const getReport = (name: string) => apiJson<Record<string, unknown>>(`/inspect/report?name=${encodeURIComponent(name)}`);
 
+// ========== 检查规则管理 ==========
+export const getRules = () =>
+  apiJson<{ builtin: RuleInfo[]; custom: RuleInfo[] }>('/inspect/rules');
+export const addRule = (p: { pattern: string; severity: string; message: string; code_only?: boolean }) =>
+  apiJson<{ message: string; id: string }>('/inspect/rules', { method: 'POST', body: JSON.stringify(p) });
+export const deleteRule = (id: string) =>
+  apiJson<{ message: string }>(`/inspect/rules/${encodeURIComponent(id)}`, { method: 'DELETE' });
+
 // ========== 工作区(ZCode 式:打开本地项目文件夹) ==========
 export const confirmAgentChange = (changeId: string, approved: boolean) =>
   apiJson<{ success: boolean }>('/agent/confirm', {
@@ -219,6 +229,15 @@ export const getWorkspaceFile = (path: string) =>
   apiJson<{ path: string; content: string; content_type: string; language: string; is_binary: boolean }>(
     `/workspace/file?path=${encodeURIComponent(path)}`,
   );
+export const getFileBackups = (path: string) =>
+  apiJson<{ path: string; backups: BackupInfo[] }>(
+    `/workspace/file-backups?path=${encodeURIComponent(path)}`,
+  );
+export const restoreBackup = (path: string, suffix: string) =>
+  apiJson<{ success: boolean; path: string; message: string }>('/workspace/restore-backup', {
+    method: 'POST',
+    body: JSON.stringify({ path, suffix }),
+  });
 
 /** 选择本地文件夹:桌面壳走原生对话框;浏览器环境回退手动输入路径 */
 export async function selectFolder(): Promise<string | null> {

@@ -1,18 +1,23 @@
 /** 工作区组件:顶栏(当前项目路径 + 打开/关闭) + 右侧面板(项目文件/检查报告双 Tab,ZCode 式) */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { FolderOpen, FolderClosed, File as FileIcon, ListChecks, Loader2, ShieldCheck, TrendingUp, Wrench, X } from 'lucide-react';
+import { FolderOpen, FolderClosed, File as FileIcon, ListChecks, Loader2, ShieldCheck, Settings2, TrendingUp, Wrench, X } from 'lucide-react';
 import {
+  addRule,
   closeWorkspace,
+  deleteRule,
   getReport,
+  getRules,
   getWorkspace,
   getWorkspaceFile,
   getWorkspaceTree,
+  getFileBackups,
   listReports,
   openWorkspace,
+  restoreBackup,
   selectFolder,
   streamInspect,
 } from '../lib/api';
-import type { FileNode } from '../lib/types';
+import type { BackupInfo, FileNode, RuleInfo } from '../lib/types';
 import type { ReportSummary } from '../lib/api';
 
 export function useWorkspace() {
@@ -61,18 +66,19 @@ export function useWorkspace() {
   return { workspacePath, tree, expanded, toggle, open, close, refresh };
 }
 
-function TreeItem({ node, depth, expanded, toggle }: {
+function TreeItem({ node, depth, expanded, toggle, onFileClick }: {
   node: FileNode;
   depth: number;
   expanded: Record<string, boolean>;
   toggle: (path: string) => void;
+  onFileClick: (path: string) => void;
 }) {
   const isDir = node.type === 'directory';
   const isOpen = !!expanded[node.path];
   return (
     <>
       <button
-        onClick={() => isDir && toggle(node.path)}
+        onClick={() => (isDir ? toggle(node.path) : onFileClick(node.path))}
         className="w-full flex items-center gap-1.5 px-2 py-[3px] rounded text-left text-[13px] text-gray-700 hover:bg-gray-100 transition-colors"
         style={{ paddingLeft: 8 + depth * 14 }}
         title={node.path}
@@ -83,7 +89,7 @@ function TreeItem({ node, depth, expanded, toggle }: {
         <span className="truncate">{node.name}</span>
       </button>
       {isDir && isOpen && node.children?.map(child => (
-        <TreeItem key={child.path} node={child} depth={depth + 1} expanded={expanded} toggle={toggle} />
+        <TreeItem key={child.path} node={child} depth={depth + 1} expanded={expanded} toggle={toggle} onFileClick={onFileClick} />
       ))}
     </>
   );
@@ -137,6 +143,7 @@ export function WorkspaceFilesPane({ workspacePath, tree, expanded, toggle, onOp
   onFixIssues: (issues: ReportIssue[]) => void;
 }) {
   const [tab, setTab] = useState<'files' | 'inspect'>('files');
+  const [viewFile, setViewFile] = useState<string | null>(null);
 
   const tabs = (
     <div className="h-9 shrink-0 flex items-center gap-1 px-2 border-b border-border">
@@ -181,12 +188,111 @@ export function WorkspaceFilesPane({ workspacePath, tree, expanded, toggle, onOp
           {tree.length === 0
             ? <div className="px-3 py-4 text-xs text-gray-400">空目录</div>
             : tree.map(node => (
-              <TreeItem key={node.path} node={node} depth={0} expanded={expanded} toggle={toggle} />
+              <TreeItem key={node.path} node={node} depth={0} expanded={expanded} toggle={toggle} onFileClick={setViewFile} />
             ))}
         </div>
       ) : (
         <WorkspaceInspectPane workspacePath={workspacePath} onOpen={onOpen} onFixIssues={onFixIssues} />
       )}
+      {viewFile && (
+        <FileViewerModal
+          workspacePath={workspacePath}
+          file={viewFile}
+          onClose={() => setViewFile(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+
+// ========== 文件查看弹窗(点击文件树文件;若有 .bak 历史备份可一键恢复) ==========
+function FileViewerModal({ workspacePath, file, onClose }: {
+  workspacePath: string;
+  file: string;
+  onClose: () => void;
+}) {
+  const [lines, setLines] = useState<string[] | null>(null);
+  const [error, setError] = useState('');
+  const [backups, setBackups] = useState<BackupInfo[]>([]);
+  const [restoring, setRestoring] = useState('');
+  const [notice, setNotice] = useState('');
+
+  const abs = `${workspacePath.replace(/[\\/]+$/, '')}/${file}`;
+
+  const load = useCallback(() => {
+    getWorkspaceFile(abs)
+      .then(({ content }) => setLines((content ?? '').split('\n')))
+      .catch(e => setError(e instanceof Error ? e.message : '读取失败'));
+    getFileBackups(abs)
+      .then(({ backups: b }) => setBackups(b))
+      .catch(() => setBackups([]));
+  }, [abs]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const doRestore = useCallback(async (suffix: string) => {
+    setRestoring(suffix); setNotice('');
+    try {
+      const { message } = await restoreBackup(file, suffix);
+      setNotice(message);
+      setLines(null);
+      load();
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : '恢复失败');
+    } finally {
+      setRestoring('');
+    }
+  }, [file, load]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6" onClick={onClose}>
+      <div
+        className="w-full max-w-3xl max-h-[80vh] flex flex-col rounded-xl bg-white shadow-2xl overflow-hidden"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="flex items-center gap-2 px-4 py-2.5 border-b border-border bg-gray-50">
+          <FileIcon className="w-4 h-4 text-gray-400 shrink-0" />
+          <span className="font-mono text-xs text-gray-700 truncate">{file}</span>
+          <button onClick={onClose} className="ml-auto p-1 rounded hover:bg-gray-200 text-gray-400 hover:text-gray-600">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+        {backups.length > 0 && (
+          <div className="px-4 py-2 border-b border-amber-100 bg-amber-50 flex items-center gap-2 flex-wrap">
+            <span className="text-[11px] text-amber-700 font-medium">历史备份(智能体修改前自动留存,新→旧):</span>
+            {backups.map(b => (
+              <button
+                key={b.suffix}
+                onClick={() => doRestore(b.suffix)}
+                disabled={!!restoring}
+                className="px-2 py-0.5 rounded border border-amber-200 bg-white text-[11px] text-amber-700 hover:bg-amber-100 transition-colors disabled:opacity-50"
+                title={`${b.mtime} · ${b.size} 字节`}
+              >
+                {restoring === b.suffix ? '恢复中...' : `恢复到 ${b.mtime.replace('T', ' ')}`}
+              </button>
+            ))}
+          </div>
+        )}
+        {notice && <div className="px-4 py-1.5 text-[11px] text-green-700 bg-green-50">{notice}</div>}
+        <div className="flex-1 min-h-0 overflow-auto scrollbar-thin bg-gray-900">
+          {error && <div className="p-4 text-xs text-red-400">{error}</div>}
+          {!lines && !error && <div className="p-4 text-xs text-gray-400">加载中...</div>}
+          {lines && (
+            <div className="py-2 font-mono text-[12px] leading-5">
+              {lines.slice(0, 600).map((l, i) => (
+                <div key={i} className="flex hover:bg-white/5">
+                  <span className="w-12 shrink-0 pr-2 text-right text-gray-500 select-none">{i + 1}</span>
+                  <span className="whitespace-pre-wrap break-all pr-4 text-gray-200">{l || ' '}</span>
+                </div>
+              ))}
+              {lines.length > 600 && (
+                <div className="px-4 py-1 text-[11px] text-gray-500">仅显示前 600 行,完整内容共 {lines.length} 行</div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -321,6 +427,149 @@ function ScoreTrend({ history }: { history: ReportSummary[] }) {
   );
 }
 
+// ========== 检查规则管理弹窗(内置规则只读 + 自定义规则增删) ==========
+function RulesModal({ onClose }: { onClose: () => void }) {
+  const [builtin, setBuiltin] = useState<RuleInfo[]>([]);
+  const [custom, setCustom] = useState<RuleInfo[]>([]);
+  const [showBuiltin, setShowBuiltin] = useState(false);
+  const [pattern, setPattern] = useState('');
+  const [severity, setSeverity] = useState('medium');
+  const [message, setMessage] = useState('');
+  const [codeOnly, setCodeOnly] = useState(true);
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const { builtin: b, custom: c } = await getRules();
+      setBuiltin(b);
+      setCustom(c);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '加载规则失败');
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const handleAdd = async () => {
+    setError('');
+    if (!pattern.trim()) { setError('正则表达式不能为空'); return; }
+    setSaving(true);
+    try {
+      await addRule({ pattern: pattern.trim(), severity, message: message.trim(), code_only: codeOnly });
+      setPattern(''); setMessage('');
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '添加失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    setError('');
+    try {
+      await deleteRule(id);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '删除失败');
+    }
+  };
+
+  const RuleRow = ({ r, deletable }: { r: RuleInfo; deletable: boolean }) => (
+    <div className="rounded-lg border border-gray-100 bg-white px-2.5 py-1.5 text-[11px]">
+      <div className="flex items-center gap-1.5">
+        <span className={`px-1.5 py-0.5 rounded ${SEVERITY_STYLE[r.severity] || SEVERITY_STYLE.low}`}>{r.severity}</span>
+        <span className="font-mono text-gray-500">{r.id}</span>
+        {r.code_only && <span className="text-[10px] text-gray-400">仅源码</span>}
+        {deletable && (
+          <button
+            onClick={() => handleDelete(r.id)}
+            className="ml-auto text-red-500 hover:text-red-600 shrink-0"
+          >
+            删除
+          </button>
+        )}
+      </div>
+      <div className="mt-0.5 text-gray-700">{r.message}</div>
+      <div className="mt-0.5 font-mono text-gray-400 break-all">{r.pattern}</div>
+    </div>
+  );
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6" onClick={onClose}>
+      <div
+        className="w-full max-w-lg max-h-[80vh] flex flex-col rounded-xl bg-gray-50 shadow-2xl overflow-hidden"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="flex items-center gap-2 px-4 py-2.5 border-b border-border bg-white">
+          <Settings2 className="w-4 h-4 text-gray-500" />
+          <span className="text-sm font-medium text-gray-700">检查规则管理</span>
+          <span className="text-[11px] text-gray-400">内置 {builtin.length} 条 · 自定义 {custom.length} 条</span>
+          <button onClick={onClose} className="ml-auto p-1 rounded hover:bg-gray-200 text-gray-400 hover:text-gray-600">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+        <div className="flex-1 min-h-0 overflow-y-auto scrollbar-thin p-3 space-y-3">
+          <div className="rounded-lg border border-blue-100 bg-blue-50/60 p-2.5 space-y-2">
+            <div className="text-xs font-medium text-blue-800">新增自定义规则(下次检查生效)</div>
+            <input
+              value={pattern}
+              onChange={e => setPattern(e.target.value)}
+              placeholder={'正则表达式,如 (?i)secret\\s*[=:]'}
+              className="w-full rounded border border-gray-200 px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-blue-400"
+            />
+            <div className="flex items-center gap-2">
+              <select
+                value={severity}
+                onChange={e => setSeverity(e.target.value)}
+                className="rounded border border-gray-200 px-1.5 py-1 text-xs"
+              >
+                {(['critical', 'high', 'medium', 'low'] as const).map(s => (
+                  <option key={s} value={s}>{s}</option>
+                ))}
+              </select>
+              <label className="flex items-center gap-1 text-[11px] text-gray-600 select-none">
+                <input type="checkbox" checked={codeOnly} onChange={e => setCodeOnly(e.target.checked)} className="accent-blue-600" />
+                仅源码文件
+              </label>
+              <button
+                onClick={handleAdd}
+                disabled={saving}
+                className="ml-auto px-3 py-1 rounded bg-blue-600 text-white text-xs hover:bg-blue-700 transition-colors disabled:opacity-50"
+              >
+                {saving ? '添加中...' : '添加'}
+              </button>
+            </div>
+            <input
+              value={message}
+              onChange={e => setMessage(e.target.value)}
+              placeholder="问题说明(可选),如:疑似硬编码数据库口令"
+              className="w-full rounded border border-gray-200 px-2 py-1.5 text-xs focus:outline-none focus:border-blue-400"
+            />
+          </div>
+          {error && <div className="text-xs text-red-500">{error}</div>}
+          {custom.length > 0 && (
+            <div className="space-y-1.5">
+              <div className="text-xs font-medium text-gray-500">自定义规则</div>
+              {custom.map(r => <RuleRow key={r.id} r={r} deletable />)}
+            </div>
+          )}
+          <div className="space-y-1.5">
+            <button
+              onClick={() => setShowBuiltin(v => !v)}
+              className="text-xs font-medium text-gray-500 hover:text-gray-700"
+            >
+              内置规则({builtin.length}){showBuiltin ? ' ▾' : ' ▸'}
+            </button>
+            {showBuiltin && builtin.map(r => <RuleRow key={r.id} r={r} deletable={false} />)}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ReportView({ report, onFixIssues, fixing, workspacePath }: {
   report: ReportData;
   onFixIssues: (issues: ReportIssue[]) => void;
@@ -421,6 +670,7 @@ export function WorkspaceInspectPane({ workspacePath, onOpen, onFixIssues }: {
   const [history, setHistory] = useState<ReportSummary[]>([]);
   const [error, setError] = useState('');
   const [fixing, setFixing] = useState(false);
+  const [showRules, setShowRules] = useState(false);
 
   const loadHistory = useCallback(async () => {
     if (!workspacePath) return setHistory([]);
@@ -482,14 +732,25 @@ export function WorkspaceInspectPane({ workspacePath, onOpen, onFixIssues }: {
   return (
     <div className="flex-1 min-h-0 flex flex-col">
       <div className="p-3 space-y-2">
-        <button
-          onClick={run}
-          disabled={running}
-          className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-blue-600 text-white text-xs font-medium hover:bg-blue-700 transition-colors disabled:opacity-50"
-        >
-          {running ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ShieldCheck className="w-3.5 h-3.5" />}
-          {running ? '检查中...' : '运行规范检查'}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={run}
+            disabled={running}
+            className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-blue-600 text-white text-xs font-medium hover:bg-blue-700 transition-colors disabled:opacity-50"
+          >
+            {running ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ShieldCheck className="w-3.5 h-3.5" />}
+            {running ? '检查中...' : '运行规范检查'}
+          </button>
+          <button
+            onClick={() => setShowRules(true)}
+            disabled={running}
+            className="flex items-center gap-1 px-2 py-2 rounded-lg border border-gray-200 text-gray-500 text-xs hover:bg-gray-50 hover:text-gray-700 transition-colors disabled:opacity-50"
+            title="管理检查规则(内置只读,自定义可增删)"
+          >
+            <Settings2 className="w-3.5 h-3.5" />
+            规则
+          </button>
+        </div>
         <label className="flex items-center gap-1.5 text-[11px] text-gray-500 cursor-pointer select-none">
           <input
             type="checkbox"
@@ -534,6 +795,7 @@ export function WorkspaceInspectPane({ workspacePath, onOpen, onFixIssues }: {
           </div>
         )}
       </div>
+      {showRules && <RulesModal onClose={() => setShowRules(false)} />}
     </div>
   );
 }

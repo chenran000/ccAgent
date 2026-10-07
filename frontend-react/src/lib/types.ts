@@ -124,3 +124,21 @@ export interface FileNode {
   size?: number;
   children?: FileNode[];
 }
+
+// ========== 检查规则 ==========
+export interface RuleInfo {
+  id: string;
+  severity: string;
+  pattern: string;
+  message: string;
+  code_only?: boolean;
+  custom?: boolean;
+}
+
+// ========== 文件备份(.bak 轮转) ==========
+export interface BackupInfo {
+  suffix: string;
+  file: string;
+  mtime: string;
+  size: number;
+}

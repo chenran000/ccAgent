@@ -107,19 +107,64 @@ def _tool_search_code(args: Dict[str, Any]) -> Dict[str, Any]:
     return {"success": True, "output": _clip("\n".join(matches))}
 
 
+BACKUP_SUFFIXES = (".bak", ".bak.1", ".bak.2")  # 轮转备份链:最新 → 最旧,最多保留 3 份
+
+
+def _rotate_backup(path: str) -> None:
+    """写入前轮转备份:.bak → .bak.1 → .bak.2,当前内容存入 .bak"""
+    import shutil
+    if os.path.exists(path + ".bak.1"):
+        os.replace(path + ".bak.1", path + ".bak.2")
+    if os.path.exists(path + ".bak"):
+        os.replace(path + ".bak", path + ".bak.1")
+    shutil.copy2(path, path + ".bak")
+
+
+def list_backups(abs_path: str) -> list:
+    """列出某文件可用的历史备份(新 → 旧)"""
+    from datetime import datetime
+    out = []
+    for suffix in BACKUP_SUFFIXES:
+        p = abs_path + suffix
+        if os.path.isfile(p):
+            st = os.stat(p)
+            out.append({
+                "suffix": suffix,
+                "file": os.path.basename(p),
+                "mtime": datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds"),
+                "size": st.st_size,
+            })
+    return out
+
+
+def restore_backup(rel_path: str, suffix: str) -> str:
+    """把文件恢复到指定备份版本;恢复前的当前内容先入备份链(恢复本身可再撤销)"""
+    if suffix not in BACKUP_SUFFIXES:
+        raise ValueError(f"无效的备份版本: {suffix}")
+    path = _resolve(rel_path)
+    bak = path + suffix
+    if not os.path.isfile(bak):
+        raise ValueError("备份不存在或已被清理")
+    content = Path(bak).read_bytes()
+    _rotate_backup(path)
+    Path(path).write_bytes(content)
+    return os.path.relpath(path, ws_mod.get_current_workspace())
+
+
 def _tool_write_file(args: Dict[str, Any]) -> Dict[str, Any]:
     path = _resolve(args.get("path", ""))
     content = args.get("content", "")
     if not path or os.path.isdir(path):
         return {"success": False, "output": "无效的文件路径"}
     try:
-        if os.path.exists(path):
-            import shutil
-            shutil.copy2(path, path + ".bak")
+        is_update = os.path.exists(path)
+        if is_update:
+            _rotate_backup(path)
         Path(path).write_text(content, encoding="utf-8")
         rel = os.path.relpath(path, ws_mod.get_current_workspace())
-        action = "更新" if os.path.exists(path + ".bak") else "创建"
-        return {"success": True, "output": f"已{action} {rel}({len(content)} 字符;原文件备份为 .bak)"}
+        action = "更新" if is_update else "创建"
+        note = "(原内容已备份为 .bak,最多保留 3 份历史)" if is_update else ""
+        return {"success": True, "output": f"已{action} {rel}({len(content)} 字符){note}"}
     except Exception as e:
         return {"success": False, "output": f"写入失败: {e}"}
 
