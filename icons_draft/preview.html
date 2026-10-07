@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>TestAssistant 图标候选</title>
+<style>
+  body { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; background: #f3f4f6; margin: 0; padding: 28px; }
+  h1 { font-size: 18px; color: #111827; margin: 0 0 6px; }
+  p.sub { font-size: 13px; color: #6b7280; margin: 0 0 22px; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; max-width: 860px; }
+  .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 14px; padding: 18px; text-align: center; }
+  .card img { width: 128px; height: 128px; }
+  .dark img { box-shadow: 0 0 0 1px rgba(255,255,255,0.15); }
+  .card .name { font-size: 14px; font-weight: 600; color: #111827; margin-top: 12px; }
+  .card .desc { font-size: 12px; color: #6b7280; margin-top: 4px; line-height: 1.5; }
+  .darkrow { margin-top: 26px; display: flex; gap: 14px; align-items: center; background: #0f172a; border-radius: 14px; padding: 16px 20px; max-width: 860px; }
+  .darkrow img { width: 56px; height: 56px; }
+  .darkrow span { color: #cbd5e1; font-size: 12px; margin-right: 6px; }
+  .old { opacity: 0.75; }
+</style>
+</head>
+<body>
+<h1>TestAssistant AI — 应用图标候选(6 个方向)</h1>
+<p class="sub">上排大图为浅色背景效果,下方深色条为任务栏/深色桌面效果。左下角是当前旧图标(昆虫)作对比。</p>
+<div class="grid">
+  <div class="card"><img src="1_shield.svg"><div class="name">① 守护之盾</div><div class="desc">盾牌+对勾:检查把关、问题清零<br>最贴合"规范检查"主线</div></div>
+  <div class="card"><img src="2_search_braces.svg"><div class="name">② 代码审查</div><div class="desc">花括号+放大镜:在代码里找问题<br>含义最直白</div></div>
+  <div class="card"><img src="3_terminal_spark.svg"><div class="name">③ 智能终端</div><div class="desc">终端命令符+AI火花:会执行命令的智能体<br>极客感最强</div></div>
+  <div class="card"><img src="4_hex_spark.svg"><div class="name">④ AI 核心</div><div class="desc">六边形+星火:AI 智能体本体<br>科技感/抽象</div></div>
+  <div class="card"><img src="5_braces_pulse.svg"><div class="name">⑤ 代码体检</div><div class="desc">括号+脉搏线:给项目做健康检查<br>呼应健康分</div></div>
+  <div class="card"><img src="6_robot.svg"><div class="name">⑥ 助手机器人</div><div class="desc">机器人头:亲切的桌面助手<br>人格化、好认</div></div>
+</div>
+<div class="darkrow">
+  <span>深色背景:</span>
+  <img src="1_shield.svg"><img src="2_search_braces.svg"><img src="3_terminal_spark.svg"><img src="4_hex_spark.svg"><img src="5_braces_pulse.svg"><img src="6_robot.svg">
+  <span style="margin-left:auto">旧图标 →</span><img class="old" src="old.png">
+</div>
+</body>
+</html>
