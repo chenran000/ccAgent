@@ -45,6 +45,7 @@ ccAgent/
 ├── data/                       # (storage_root 下)业务 SQLite + memory/ + reports/
 ├── knowledge_base/             # ChromaDB 持久化
 ├── uploads/                    # 上传的规范/知识文档
+├── tests/                      # 核心纯逻辑单测(标准库 unittest):python -m unittest discover tests -v
 └── frontend/                   # 前端构建产物(vite outDir,后端同源服务)
 ```
 

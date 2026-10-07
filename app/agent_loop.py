@@ -9,7 +9,8 @@ import difflib
 import json
 import logging
 import os
-from typing import AsyncGenerator, Awaitable, Callable, List, Optional
+import threading
+from typing import AsyncGenerator, Awaitable, Callable, Dict, List, Optional
 
 import asyncio
 
@@ -185,66 +186,144 @@ async def stream_agent(
             # 轮次心跳:前端对未知事件类型安全忽略;保证工具/LLM 长耗时期间连接上有事件流动
             yield {"type": "turn", "step": turn, "max_turns": MAX_TURNS}
             messages = _compact(messages)
-            response = await asyncio.to_thread(
-                client.chat.completions.create,
-                model=model,
-                messages=messages,
-                tools=TOOLS_SPEC,
-                temperature=0.3,
-                max_tokens=AGENT_MAX_TOKENS,
-            )
-            choice = response.choices[0]
-            message = choice.message
 
-            tool_calls = getattr(message, "tool_calls", None)
-            if not tool_calls:
+            # 真流式:子线程执行 stream 请求,增量经线程安全队列桥接回事件循环;
+            # 内容增量即时推 chunk(用户实时看到输出),工具调用增量按 index 拼装
+            aq: asyncio.Queue = asyncio.Queue()
+            loop = asyncio.get_running_loop()
+
+            def _run_stream():
+                try:
+                    stream = client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        tools=TOOLS_SPEC,
+                        temperature=0.3,
+                        max_tokens=AGENT_MAX_TOKENS,
+                        stream=True,
+                    )
+                    for event in stream:
+                        loop.call_soon_threadsafe(aq.put_nowait, ("delta", event))
+                    loop.call_soon_threadsafe(aq.put_nowait, ("end", None))
+                except Exception as e:  # noqa: BLE001 - 异常经队列交回事件循环统一处理
+                    loop.call_soon_threadsafe(aq.put_nowait, ("error", e))
+
+            threading.Thread(target=_run_stream, daemon=True).start()
+
+            content_parts: List[str] = []
+            tool_acc: Dict[int, dict] = {}
+            stream_error: Optional[Exception] = None
+            got_delta = False
+            finish_reason = ""
+            while True:
+                kind, payload = await aq.get()
+                if kind == "delta":
+                    got_delta = True
+                    choice = payload.choices[0] if payload.choices else None
+                    if choice is None:
+                        continue
+                    if choice.finish_reason:
+                        finish_reason = choice.finish_reason
+                    delta = choice.delta
+                    if delta and delta.content:
+                        content_parts.append(delta.content)
+                        yield {"type": "chunk", "content": delta.content}
+                    for tc in (delta.tool_calls or []) if delta else []:
+                        idx = tc.index if tc.index is not None else len(tool_acc)
+                        acc = tool_acc.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                        if tc.id:
+                            acc["id"] = tc.id
+                        if tc.function and tc.function.name:
+                            acc["name"] = tc.function.name
+                        if tc.function and tc.function.arguments:
+                            acc["arguments"] += tc.function.arguments
+                elif kind == "error":
+                    stream_error = payload
+                    break
+                else:
+                    break
+
+            if stream_error is not None and not got_delta:
+                # 流式请求本身失败(端点不支持 stream+tools 等):回退非流式,保持可用性
+                logger.warning("流式请求失败,回退非流式: %s", stream_error)
+                response = await asyncio.to_thread(
+                    client.chat.completions.create,
+                    model=model,
+                    messages=messages,
+                    tools=TOOLS_SPEC,
+                    temperature=0.3,
+                    max_tokens=AGENT_MAX_TOKENS,
+                )
+                message = response.choices[0].message
                 answer = (message.content or "").strip()
-                # 分段推送,前端按 chunk 渐进渲染
-                for i in range(0, len(answer), 200):
-                    yield {"type": "chunk", "content": answer[i:i + 200]}
-                # 终态用内部 answer 事件,由路由层统一补发 done 并落库
-                yield {"type": "answer", "data": {"answer": answer, "agent": True, "turns": turn,
+                tool_calls_list = [
+                    {"id": t.id, "type": "function",
+                     "function": {"name": t.function.name, "arguments": t.function.arguments}}
+                    for t in (getattr(message, "tool_calls", None) or [])
+                ]
+            else:
+                if stream_error is not None:
+                    raise stream_error
+                if finish_reason == "length":
+                    logger.warning("第 %d 轮输出触及 max_tokens 上限,长内容可能被截断", turn)
+                answer = "".join(content_parts)
+                tool_calls_list = [
+                    {
+                        "id": tool_acc[idx]["id"] or f"call_{turn}_{idx}",
+                        "type": "function",
+                        "function": {
+                            "name": tool_acc[idx]["name"],
+                            "arguments": tool_acc[idx]["arguments"] or "{}",
+                        },
+                    }
+                    for idx in sorted(tool_acc)
+                ]
+
+            if not tool_calls_list:
+                # 最终回答已在流式中按增量推送,这里只发终态事件,由路由层统一补发 done 并落库
+                yield {"type": "answer", "data": {"answer": answer.strip(), "agent": True, "turns": turn,
                                                   "written_files": written_files}}
                 return
 
             # 追加助手消息(含工具调用意图)
-            messages.append({
-                "role": "assistant",
-                "content": message.content or "",
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {"name": tc.function.name, "arguments": tc.function.arguments},
-                    }
-                    for tc in tool_calls
-                ],
-            })
+            messages.append({"role": "assistant", "content": answer, "tool_calls": tool_calls_list})
 
-            for tc in tool_calls:
+            for tc in tool_calls_list:
+                tc_id = tc["id"]
+                name = tc["function"]["name"]
+                raw_args = tc["function"]["arguments"]
                 try:
-                    args = json.loads(tc.function.arguments or "{}")
+                    args = json.loads(raw_args or "{}")
                 except json.JSONDecodeError:
-                    args = {}
+                    # 参数非法(常见于输出被截断):不执行,回传错误让模型重新给全参数,
+                    # 防止 write_file 以空 content 覆盖真实文件
+                    messages.append({
+                        "role": "tool", "tool_call_id": tc_id,
+                        "content": "工具参数不是合法 JSON(可能被截断),请重新调用该工具并给全参数。",
+                    })
+                    yield {"type": "step", "step": turn, "action": f"{name}(参数无效)",
+                           "target": str(raw_args)[:80], "result": "参数不是合法 JSON,已跳过执行",
+                           "success": False, "console_errors": [], "network_errors": []}
+                    continue
 
                 # 写文件/执行命令需用户确认:展示 diff 或命令,等待 /agent/confirm 裁决
-                if tc.function.name == "write_file" and confirm_hook is not None:
-                    change_id = f"chg-{turn}-{tc.id[-6:]}"
+                if name == "write_file" and confirm_hook is not None:
+                    change_id = f"chg-{turn}-{tc_id[-6:]}"
                     diff = _build_write_diff(workspace, args.get("path", ""), args.get("content", ""))
                     yield {"type": "confirm_request", "change_id": change_id, "kind": "write",
                            "path": args.get("path", ""), "diff": diff}
                     approved = await confirm_hook(change_id)
                     if not approved:
                         messages.append({
-                            "role": "tool", "tool_call_id": tc.id,
+                            "role": "tool", "tool_call_id": tc_id,
                             "content": "用户拒绝了这次修改。请勿再次提交相同修改,继续其他工作或调整方案。",
                         })
                         yield {"type": "step", "step": turn, "action": "write_file(已拒绝)",
                                "target": _summarize_args(args), "result": "用户拒绝了该修改",
                                "success": False, "console_errors": [], "network_errors": []}
                         continue
-                elif tc.function.name == "run_command" and confirm_hook is not None:
-                    change_id = f"cmd-{turn}-{tc.id[-6:]}"
+                elif name == "run_command" and confirm_hook is not None:
+                    change_id = f"cmd-{turn}-{tc_id[-6:]}"
                     cmd_timeout = int(args.get("timeout", 60) or 60)
                     yield {"type": "confirm_request", "change_id": change_id, "kind": "command",
                            "path": args.get("command", ""),
@@ -252,7 +331,7 @@ async def stream_agent(
                     approved = await confirm_hook(change_id)
                     if not approved:
                         messages.append({
-                            "role": "tool", "tool_call_id": tc.id,
+                            "role": "tool", "tool_call_id": tc_id,
                             "content": "用户拒绝执行该命令。请勿再次提交相同命令,改用其他方案。",
                         })
                         yield {"type": "step", "step": turn, "action": "run_command(已拒绝)",
@@ -260,9 +339,9 @@ async def stream_agent(
                                "success": False, "console_errors": [], "network_errors": []}
                         continue
 
-                result = await asyncio.to_thread(execute_tool, tc.function.name, args)
+                result = await asyncio.to_thread(execute_tool, name, args)
 
-                if tc.function.name == "write_file" and result.get("success"):
+                if name == "write_file" and result.get("success"):
                     try:
                         from app.agent_tools import _resolve
                         abs_p = _resolve(args.get("path", ""))
@@ -272,13 +351,13 @@ async def stream_agent(
                 preview = result["output"][:300]
                 messages.append({
                     "role": "tool",
-                    "tool_call_id": tc.id,
+                    "tool_call_id": tc_id,
                     "content": result["output"],
                 })
                 yield {
                     "type": "step",
                     "step": turn,
-                    "action": tc.function.name,
+                    "action": name,
                     "target": _summarize_args(args),
                     "result": preview,
                     "success": result["success"],
