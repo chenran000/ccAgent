@@ -2,8 +2,8 @@
 import { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import {
+  Activity,
   BookOpen,
-  Bug,
   ChevronDown,
   ChevronRight,
   FileEdit,
@@ -52,13 +52,13 @@ const pct = (v: unknown): string =>
   typeof v === 'number' && v > 0 ? ` ${Math.round(v * 100)}%` : '';
 
 const SAMPLES_AGENT = [
-  { icon: Bug, text: '分析这个项目的整体结构和技术栈' },
+  { icon: Activity, text: '分析这个项目的整体结构和技术栈' },
   { icon: ListChecks, text: '检查项目里有没有硬编码的密码或密钥' },
   { icon: Sparkles, text: '找出代码中潜在的性能问题并给出修复建议' },
   { icon: BookOpen, text: '帮我给核心模块补充单元测试' },
 ];
 const SAMPLES = [
-  { icon: Bug, text: '分析这个 bug：点击提交按钮后页面无响应' },
+  { icon: Activity, text: '分析这个 bug：点击提交按钮后页面无响应' },
   { icon: ListChecks, text: '为登录功能设计一份测试用例' },
   { icon: BookOpen, text: '什么是边界值分析和等价类划分？' },
   { icon: Sparkles, text: '帮我写一个 Python 快速排序实现' },
@@ -608,14 +608,14 @@ export default function ChatPanel({ workspacePath, ...props }: ChatPanelProps) {
         <div className="max-w-3xl mx-auto space-y-4">
           {messages.length === 0 && (
             <div className="pt-16 text-center animate-slide-up">
-              <div className="inline-flex items-center justify-center w-14 h-14 bg-gradient-to-br from-blue-500 to-blue-600 rounded-2xl shadow-lg shadow-blue-500/20 mb-4">
-                <Bug className="w-7 h-7 text-white" />
+              <div className="inline-flex items-center justify-center w-14 h-14 bg-gradient-to-br from-sky-500 to-blue-700 rounded-2xl shadow-lg shadow-blue-500/20 mb-4">
+                <Activity className="w-7 h-7 text-white" />
               </div>
               <h2 className="text-lg font-bold text-gray-900">{workspacePath ? '开始与项目对话' : '开始你的任务'}</h2>
               <p className="text-sm text-gray-400 mt-1 mb-6">
                 {workspacePath
                   ? '智能体已就绪:代码分析 / Bug 定位 / 规范检查 / 用例生成 / 自动修复,工具执行过程实时可见'
-                  : '直接描述需求,自动识别意图:Web 自动化测试 / 用例生成 / Bug 分析 / 知识管理'}
+                  : '直接描述需求:代码解答 / 知识库问答 / 用例设计 / 写代码,打开项目后可全权操作'}
               </p>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-w-xl mx-auto">
                 {(workspacePath ? SAMPLES_AGENT : SAMPLES).map(({ icon: Icon, text }) => (

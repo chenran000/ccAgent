@@ -1,8 +1,8 @@
 /** 侧边栏:视图切换、会话管理、知识库统计 */
 import { useState } from 'react';
 import {
+  Activity,
   BookOpen,
-  Bug,
   Check,
   MessageSquare,
   Pencil,
@@ -52,12 +52,12 @@ export default function Sidebar(props: SidebarProps) {
     <aside className="w-64 shrink-0 h-full bg-white border-r border-border flex flex-col">
       {/* Logo */}
       <div className="px-4 py-4 border-b border-border flex items-center gap-2.5">
-        <div className="w-9 h-9 bg-gradient-to-br from-blue-500 to-blue-600 rounded-xl flex items-center justify-center shadow-md shadow-blue-500/20">
-          <Bug className="w-5 h-5 text-white" />
+        <div className="w-9 h-9 bg-gradient-to-br from-sky-500 to-blue-700 rounded-xl flex items-center justify-center shadow-md shadow-blue-500/20">
+          <Activity className="w-5 h-5 text-white" />
         </div>
         <div className="min-w-0">
           <div className="text-sm font-bold text-gray-900 truncate">TestAssistant AI</div>
-          <div className="text-[11px] text-gray-400">高级测试助手</div>
+          <div className="text-[11px] text-gray-400">代码检查智能体</div>
         </div>
       </div>
 
