@@ -1089,6 +1089,8 @@ def register_routes(app):
                 try:
                     return await asyncio.wait_for(fut, timeout=300)
                 except asyncio.TimeoutError:
+                    # 与主动拒绝区分开:超时多为前端关闭/无人值守,记录日志便于排查
+                    logger.warning("写文件确认超时(300s),按拒绝处理: %s", change_id)
                     return False
                 finally:
                     _pending_write_confirms.pop(change_id, None)

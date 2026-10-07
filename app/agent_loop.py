@@ -25,6 +25,11 @@ MAX_DIFF_LINES = 160              # 推给前端的 diff 最大行数
 HISTORY_COMPACT_CHARS = 24000     # 历史对话超过该字符数时触发 LLM 摘要压缩
 HISTORY_KEEP_RECENT = 4           # 摘要压缩时保留的最近对话轮数
 HISTORY_WINDOW = 10               # 进上下文的历史轮数窗口
+# 单轮 LLM 请求超时(秒);网络挂起时由客户端超时兜底,而不是无限阻塞 SSE 流
+LLM_CALL_TIMEOUT = float(os.getenv("TESTASSISTANT_LLM_TIMEOUT", "300"))
+# 单轮输出上限( tokens );write_file 语义是"完整给出修改后的文件内容",
+# 过低的上限会让长文件被静默截断后直接覆盖原文件,必须显式给足
+AGENT_MAX_TOKENS = int(os.getenv("TESTASSISTANT_AGENT_MAX_TOKENS", "8192"))
 
 SYSTEM_PROMPT = """你是 TestAssistant AI,一个运行在用户本机的桌面编程智能体,当前打开了用户的项目工作区。
 
@@ -169,7 +174,7 @@ async def stream_agent(
         yield {"type": "error", "message": "未配置AI模型,请先到模型管理配置"}
         return
 
-    client = build_plain_client(ai_config)
+    client = build_plain_client(ai_config, timeout=LLM_CALL_TIMEOUT)
     model = ai_config["chat_model"]
     history = await _compact_history(client, model, history)
     messages = _build_messages(history, user_message, workspace)
@@ -177,6 +182,8 @@ async def stream_agent(
 
     try:
         for turn in range(1, MAX_TURNS + 1):
+            # 轮次心跳:前端对未知事件类型安全忽略;保证工具/LLM 长耗时期间连接上有事件流动
+            yield {"type": "turn", "step": turn, "max_turns": MAX_TURNS}
             messages = _compact(messages)
             response = await asyncio.to_thread(
                 client.chat.completions.create,
@@ -184,6 +191,7 @@ async def stream_agent(
                 messages=messages,
                 tools=TOOLS_SPEC,
                 temperature=0.3,
+                max_tokens=AGENT_MAX_TOKENS,
             )
             choice = response.choices[0]
             message = choice.message
@@ -237,8 +245,10 @@ async def stream_agent(
                         continue
                 elif tc.function.name == "run_command" and confirm_hook is not None:
                     change_id = f"cmd-{turn}-{tc.id[-6:]}"
+                    cmd_timeout = int(args.get("timeout", 60) or 60)
                     yield {"type": "confirm_request", "change_id": change_id, "kind": "command",
-                           "path": args.get("command", ""), "diff": ""}
+                           "path": args.get("command", ""),
+                           "diff": f"工作目录: {workspace}\n超时: {cmd_timeout}s"}
                     approved = await confirm_hook(change_id)
                     if not approved:
                         messages.append({

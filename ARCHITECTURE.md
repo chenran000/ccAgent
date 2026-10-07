@@ -181,6 +181,8 @@ npm run build   # 产物输出 ../frontend/,由后端 / 直接服务
 | EMBEDDING_API_KEY / EMBEDDING_API_BASE / EMBEDDING_MODEL | 空 | OpenAI 兼容 embeddings 接口;不配则知识库向量能力禁用(其余功能正常) |
 | RAG_CHUNK_SIZE / RAG_CHUNK_OVERLAP | 500 / 100 | 分块参数 |
 | RAG_MIN_SIMILARITY | 0.3 | 检索相关度阈值(cosine) |
+| TESTASSISTANT_LLM_TIMEOUT | 300 | 单轮 LLM 请求超时秒数(防网络挂起无限阻塞) |
+| TESTASSISTANT_AGENT_MAX_TOKENS | 8192 | 智能体单轮输出上限;过低会截断 write_file 的全文件内容 |
 
 ## 打包(exe 桌面版)
 

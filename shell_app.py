@@ -56,8 +56,8 @@ def main():
     backend = subprocess.Popen(
         [backend_path()],
         cwd=os.path.dirname(backend_path()),
-        # 隐藏后端控制台窗口
-        creationflags=subprocess.CREATE_NO_WINDOW,
+        # 隐藏后端控制台窗口(CREATE_NO_WINDOW 为 Windows 专属常量,其他平台传 0)
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     try:
         if not wait_backend():

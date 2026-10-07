@@ -15,9 +15,17 @@ logger = logging.getLogger(__name__)
 
 MAX_OUTPUT_CHARS = 4000
 MAX_SEARCH_MATCHES = 50
+MAX_COMMAND_TIMEOUT_SECONDS = 600  # run_command 超时上限,防止模型传超大 timeout 长期占用线程
 
 # 忽略目录(搜索/树共用)
 _SKIP_DIRS = ws_mod.IGNORE_DIRS | {"browsers", "_internal"}
+
+# search_code 未指定 glob 时的默认文件范围:只扫源码与配置类文本,跳过二进制/媒体/构建产物
+_SEARCH_DEFAULT_EXTS = {
+    ".py", ".js", ".ts", ".tsx", ".jsx", ".vue", ".java", ".go", ".cs",
+    ".c", ".cpp", ".h", ".php", ".rb", ".rs", ".sql",
+    ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".env", ".md",
+}
 
 
 def _resolve(path: str) -> str:
@@ -83,7 +91,11 @@ def _tool_search_code(args: Dict[str, Any]) -> Dict[str, Any]:
     for root, dirs, files in os.walk(ws):
         dirs[:] = [d for d in dirs if d not in _SKIP_DIRS and not d.startswith(".")]
         for name in files:
-            if glob and not Path(name).suffix.lower().lstrip(".").startswith(glob.lstrip(".")):
+            ext = Path(name).suffix.lower()
+            if glob:
+                if not ext.lstrip(".").startswith(glob.lstrip(".")):
+                    continue
+            elif ext not in _SEARCH_DEFAULT_EXTS:
                 continue
             full = os.path.join(root, name)
             try:
@@ -177,7 +189,8 @@ def _tool_run_command(args: Dict[str, Any]) -> Dict[str, Any]:
     try:
         proc = subprocess.run(
             command, shell=True, cwd=ws, capture_output=True, text=True,
-            timeout=int(args.get("timeout", 60) or 60), errors="replace",
+            timeout=min(int(args.get("timeout", 60) or 60), MAX_COMMAND_TIMEOUT_SECONDS),
+            errors="replace",
         )
         out = (proc.stdout or "") + (("\n[stderr] " + proc.stderr) if proc.stderr else "")
         return {"success": proc.returncode == 0,
@@ -225,14 +238,21 @@ def _tool_search_standards(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"success": False, "output": f"规范检索失败: {e}"}
 
 
+_user_id_cache: Any = None
+
+
 def _current_user_id() -> int:
-    """单用户版:取本地用户 id"""
+    """单用户版:取本地用户 id(固定不变,进程内缓存避免每次检索都开库查询)"""
+    global _user_id_cache
+    if _user_id_cache is not None:
+        return _user_id_cache
     from app.database import SessionLocal
     from app.models import User
     db = SessionLocal()
     try:
         user = db.query(User).order_by(User.id.asc()).first()
-        return user.id if user else 0
+        _user_id_cache = user.id if user else 0
+        return _user_id_cache
     finally:
         db.close()
 

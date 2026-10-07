@@ -36,11 +36,14 @@ class CodeReview(BaseModel):
 
 # ========== 客户端构建 ==========
 
-def build_plain_client(ai_config: dict) -> openai.OpenAI:
-    """构建普通 OpenAI 兼容客户端"""
+def build_plain_client(ai_config: dict, timeout: float = 300.0) -> openai.OpenAI:
+    """构建普通 OpenAI 兼容客户端
+
+    timeout 为单次请求的最长等待秒数,防止网络挂起时无限阻塞调用方(SSE 流/智能体循环)。
+    """
     api_key = ai_config.get("api_key") or ""
     base_url = ai_config.get("api_base_url") or _DEFAULT_BASE_URL
-    return openai.OpenAI(api_key=api_key, base_url=base_url)
+    return openai.OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
 
 
 def create_structured(
